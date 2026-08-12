@@ -37,7 +37,17 @@ from analysis.chanlun_daily import analyze_chanlun_daily, daily_result_to_dict
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("trend_app")
 
-PORT = 8795
+HOST = os.environ.get("STOCK_HOST", "127.0.0.1").strip()
+if not HOST:
+    raise RuntimeError("环境变量 STOCK_HOST 不能为空")
+
+try:
+    PORT = int(os.environ.get("STOCK_PORT", "8795"))
+except ValueError as exc:
+    raise RuntimeError("环境变量 STOCK_PORT 必须是整数") from exc
+if not 1 <= PORT <= 65535:
+    raise RuntimeError("环境变量 STOCK_PORT 必须在 1 到 65535 之间")
+
 DASHBOARD_DIR = os.path.join(ROOT, "dashboard")
 # count 参数安全解析上限，防止非法输入导致 500 或超大值放大网络请求
 MAX_KLINE_COUNT = 10000
@@ -920,9 +930,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     os.makedirs(DASHBOARD_DIR, exist_ok=True)
     # ThreadingHTTPServer: 多线程处理，浏览器并发请求不会卡死
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
-    log.info(f"趋势分析实时买卖点工具启动 → http://127.0.0.1:{PORT}")
+    log.info(f"趋势分析实时买卖点工具启动 → http://{HOST}:{PORT}")
     log.info(f"API: /api/analyze?symbol=600000")
     try:
         server.serve_forever()

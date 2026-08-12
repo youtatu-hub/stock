@@ -2,14 +2,13 @@
 
 ## Project Structure & Module Organization
 
-This is a Windows-oriented Python stock-analysis service. `app.py` hosts the HTTP API and dashboard on `127.0.0.1:8795`; `launcher.py` handles licensing and startup. Keep market-data access and models in `data/`, and algorithms in `analysis/` (trend, patterns, volume/price, CAN SLIM, breakout, and Chanlun). Static UI files live in `dashboard/`, notes in `docs/`, and vendored packages in `libs/`. Treat `data/license.dat`, logs, and `__pycache__/` as runtime artifacts.
+This is a Python stock-analysis service. `app.py` hosts the HTTP API and dashboard on port `8795`; the bind address and port are configurable with `STOCK_HOST` and `STOCK_PORT`. Keep market-data access and models in `data/`, and algorithms in `analysis/` (trend, patterns, volume/price, CAN SLIM, breakout, and Chanlun). Static UI files live in `dashboard/`, notes in `docs/`, and vendored packages in `libs/`. Treat logs and `__pycache__/` as runtime artifacts.
 
 ## Build, Test, and Development Commands
 
-- `py -3 app.py` starts the API and dashboard directly for development, bypassing the licensed launcher.
+- `py -3 app.py` starts the API and dashboard directly for development.
 - `调试启动.bat` provides the same debug startup from Windows Explorer.
-- `启动.bat` runs the normal licensed flow through `launcher.py`.
-- `py -3 -m compileall app.py launcher.py license_core.py gen_license.py analysis data` performs a fast syntax/import-bytecode check.
+- `py -3 -m compileall app.py analysis data` performs a fast syntax/import-bytecode check.
 - Open `http://127.0.0.1:8795/api/health` for a minimal service smoke test.
 
 There is no build system or dependency manifest. Avoid modifying `libs/`; it is the portable dependency bundle.
@@ -24,8 +23,8 @@ No automated test suite is checked in. Add tests under `tests/`, named `test_<mo
 
 ## Commit & Pull Request Guidelines
 
-Git history is unavailable in this copy, so use concise imperative commits such as `fix: clamp invalid kline counts` or `feat: add weekly signal summary`. Keep each commit scoped to one behavior. Pull requests should describe the change, affected modules, verification, and data or license implications. Include screenshots for UI changes and sample payloads for API changes.
+Git history is unavailable in this copy, so use concise imperative commits such as `fix: clamp invalid kline counts` or `feat: add weekly signal summary`. Keep each commit scoped to one behavior. Pull requests should describe the change, affected modules, verification, and data implications. Include screenshots for UI changes and sample payloads for API changes.
 
 ## Security & Configuration
 
-Never commit signing keys, customer licenses, credentials, or captured market data. Keep the service bound to localhost unless authentication is added. Validate inputs at API boundaries and bound network requests.
+Never commit credentials or captured market data. Keep the service bound to localhost unless network access is intentionally restricted by a firewall, VPN, or reverse proxy. Validate inputs at API boundaries and bound network requests.
