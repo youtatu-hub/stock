@@ -1,0 +1,16 @@
+services:
+  stock-analysis:
+    build:
+      context: .
+    image: stock-analysis:local
+    container_name: stock-analysis
+    restart: unless-stopped
+    init: true
+    environment:
+      STOCK_HOST: 0.0.0.0
+      STOCK_PORT: "8795"
+      TZ: Asia/Shanghai
+    ports:
+      - "${STOCK_BIND_ADDRESS:-127.0.0.1}:${STOCK_HTTP_PORT:-8795}:8795"
+    security_opt:
+      - no-new-privileges:true

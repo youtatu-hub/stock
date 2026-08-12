@@ -1,0 +1,12 @@
+.git
+.idea
+.agents
+.codex
+.env
+.env.*
+**/__pycache__/
+**/*.py[cod]
+*.bat
+*.pdf
+data/*.log
+docs/
