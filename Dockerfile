@@ -16,7 +16,7 @@ RUN apt-get update \
 
 COPY --chown=stock:stock app.py ./
 COPY --chown=stock:stock analysis/ ./analysis/
-COPY --chown=stock:stock data/__init__.py data/kline_fetcher.py ./data/
+COPY --chown=stock:stock data/ ./data/
 COPY --chown=stock:stock dashboard/ ./dashboard/
 COPY --chown=stock:stock libs/ ./libs/
 

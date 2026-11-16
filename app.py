@@ -18,6 +18,7 @@ import logging
 import threading
 import time
 import concurrent.futures
+import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -28,8 +29,11 @@ sys.path.insert(0, ROOT)
 from data.kline_fetcher import (
     fetch_kline, fetch_quote, fetch_fund_flow, search_stock, fetch_minute,
     fetch_realtime_flow, fetch_all_a_shares, fetch_index_kline, fetch_market_breadth,
+    fetch_kline_extras, enrich_klines,
     Kline, Quote, FundFlow, MinuteData, MinuteFlow
 )
+from data.market_breadth import market_breadth_cache
+from data.request_runtime import collect_stages, fetch_required, request_id
 from analysis.signal_engine import run_analysis, SignalEngineResult
 from analysis.chanlun_minute import analyze_chanlun_minute, signals_to_dict
 from analysis.chanlun_daily import analyze_chanlun_daily, daily_result_to_dict
@@ -361,6 +365,7 @@ def _apply_signal_optimization(signal_data: dict, klines: list, quote) -> dict:
 
 # ---- API处理 ----
 def handle_analyze(params: dict) -> dict:
+    started = time.monotonic()
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
@@ -368,28 +373,30 @@ def handle_analyze(params: dict) -> dict:
     period = params.get("period", ["day"])[0].strip()
     log.info(f"开始分析 {symbol} (period={period})")
 
-    # 获取数据
-    klines = fetch_kline(symbol, count=250, period=period)
+    data, degraded, timings = collect_stages({
+        "kline": lambda: fetch_kline(symbol, count=250, period=period, enrich=False),
+        "quote": lambda: fetch_quote(symbol),
+        "fund_flow": lambda: fetch_fund_flow(symbol, days=30),
+        "index": lambda: fetch_index_kline("000001", count=60),
+        "kline_extras": lambda: fetch_kline_extras(symbol, count=250, period=period),
+    }, required=("kline",))
+    klines = data.get("kline", [])
     if len(klines) < 30:
-        return {"error": f"K线数据不足: {len(klines)}条"}
-
-    quote = fetch_quote(symbol)
-    flows = fetch_fund_flow(symbol, days=30)
-
-    # 获取大盘指数（上证指数）用于CAN SLIM M维度
-    from data.kline_fetcher import fetch_index_kline, fetch_market_breadth
-    try:
-        index_klines = fetch_index_kline("000001", count=60)
-    except Exception:
-        index_klines = None
-
-    # 获取市场宽度（涨跌家数）用于M维度修正
-    try:
-        breadth = fetch_market_breadth()
-    except Exception:
-        breadth = None
+        return {"error": degraded.get("kline", f"K线数据不足: {len(klines)}条"),
+                "degraded": degraded, "timings_ms": timings}
+    klines = enrich_klines(klines, data.get("kline_extras", {}))
+    quote = data.get("quote")
+    flows = data.get("fund_flow", [])
+    index_klines = data.get("index")
+    breadth_started = time.monotonic()
+    breadth_snapshot = market_breadth_cache.snapshot()
+    breadth = breadth_snapshot.pop("data")
+    timings["breadth_cache"] = round((time.monotonic() - breadth_started) * 1000, 1)
+    if breadth_snapshot["stale"]:
+        degraded["breadth"] = ("市场宽度使用最近成功缓存" if breadth else "市场宽度尚未就绪")
 
     # 运行分析
+    analysis_started = time.monotonic()
     result = run_analysis(klines, quote, flows, index_klines)
 
     # 后处理：用市场宽度修正M评分（加密模块无法内部修改，在此修正）
@@ -420,7 +427,9 @@ def handle_analyze(params: dict) -> dict:
             br_label = "普跌"
         new_m = max(0, min(100, old_m + bonus))
         signal_data["canslim"]["m_score"] = new_m
-        br_signal = f"今日{up_n}涨/{down_n}跌，{pct_str}个股上涨({br_label})"
+        br_signal = f"市场宽度{up_n}涨/{down_n}跌，{pct_str}个股上涨({br_label})"
+        if breadth_snapshot["stale"]:
+            br_signal += f"，缓存时间{breadth_snapshot['updated_at']}"
         if signal_data["canslim"].get("signals"):
             signal_data["canslim"]["signals"] = list(signal_data["canslim"]["signals"]) + [br_signal]
         if signal_data["canslim"].get("description"):
@@ -428,6 +437,11 @@ def handle_analyze(params: dict) -> dict:
 
     # ---- 信号引擎优化：硬否决/软否决/分级体系/仓位管理/盈亏比 ----
     signal_data = _apply_signal_optimization(signal_data, klines, quote)
+    if degraded:
+        stage_labels = {"quote": "报价", "fund_flow": "资金流", "index": "大盘指数",
+                        "kline_extras": "成交额/换手率", "breadth": "市场宽度"}
+        signal_data["risk_warnings"].append("部分数据降级：" + "；".join(
+            f"{stage_labels.get(stage, stage)}：{reason}" for stage, reason in degraded.items()))
 
     # 构建大盘环境摘要
     market_env = ""
@@ -442,6 +456,10 @@ def handle_analyze(params: dict) -> dict:
             br = breadth.get("breadth_ratio", 0)
             market_env += f" | {up_n}涨{down_n}跌({br*100:.0f}%上涨)"
 
+    timings["analysis"] = round((time.monotonic() - analysis_started) * 1000, 1)
+    timings["total"] = round((time.monotonic() - started) * 1000, 1)
+    log.info("analysis_done request_id=%s symbol=%s period=%s timings_ms=%s degraded=%s",
+             request_id.get(), symbol, period, timings, degraded)
     return {
         "symbol": symbol,
         "name": quote.name if quote else "",
@@ -452,6 +470,9 @@ def handle_analyze(params: dict) -> dict:
                     "large_net": f.large_net, "main_pct": f.main_pct} for f in flows] if flows else [],
         "market_env": market_env,  # 大盘环境摘要
         "breadth": breadth,  # 市场宽度（涨跌家数）
+        "breadth_status": breadth_snapshot,
+        "degraded": degraded,
+        "timings_ms": timings,
     }
 
 
@@ -459,7 +480,7 @@ def handle_quote(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
-    q = fetch_quote(symbol)
+    q = fetch_required("quote", lambda: fetch_quote(symbol))
     return quote_to_dict(q) if q else {"error": "获取行情失败"}
 
 
@@ -467,7 +488,8 @@ def handle_search(params: dict) -> dict:
     keyword = params.get("keyword", [""])[0].strip()
     if not keyword:
         return {"error": "缺少keyword参数"}
-    results = search_stock(keyword)
+    # 无搜索结果本身是正常响应。
+    results = fetch_required("search", lambda: {"results": search_stock(keyword)})["results"]
     return {"results": results}
 
 
@@ -477,8 +499,18 @@ def handle_kline(params: dict) -> dict:
     period = params.get("period", ["day"])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
-    klines = fetch_kline(symbol, count=count, period=period)
-    return {"klines": [kline_to_dict(k) for k in klines]}
+    basic = params.get("basic", ["0"])[0] == "1"
+    if basic:
+        klines = fetch_required("kline", lambda: fetch_kline(symbol, count=count, period=period, enrich=False))
+        return {"klines": [kline_to_dict(k) for k in klines], "basic": True}
+    data, degraded, timings = collect_stages({
+        "kline": lambda: fetch_kline(symbol, count=count, period=period, enrich=False),
+        "kline_extras": lambda: fetch_kline_extras(symbol, count=count, period=period),
+    }, required=("kline",))
+    if "kline" not in data:
+        return {"error": degraded["kline"], "klines": [], "timings_ms": timings}
+    klines = enrich_klines(data["kline"], data.get("kline_extras", {}))
+    return {"klines": [kline_to_dict(k) for k in klines], "degraded": degraded, "timings_ms": timings}
 
 
 def handle_minute(params: dict) -> dict:
@@ -486,7 +518,7 @@ def handle_minute(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
-    md = fetch_minute(symbol)
+    md = fetch_required("minute", lambda: fetch_minute(symbol))
     if not md:
         return {"error": "获取分时数据失败"}
     return {
@@ -507,7 +539,7 @@ def handle_chanlun_minute(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
-    md = fetch_minute(symbol)
+    md = fetch_required("minute", lambda: fetch_minute(symbol))
     if not md or not md.prices:
         return {"error": "获取分时数据失败"}
     # 运行缠论分析
@@ -522,7 +554,7 @@ def handle_chanlun_daily(params: dict) -> dict:
         return {"error": "缺少symbol参数"}
     count = _parse_count(params, max_count=MAX_CHANLUN_COUNT)
     period = params.get("period", ["day"])[0].strip()
-    klines = fetch_kline(symbol, count=count, period=period)
+    klines = fetch_required("kline", lambda: fetch_kline(symbol, count=count, period=period, enrich=False))
     if not klines or len(klines) < 10:
         return {"error": f"K线数据不足（仅{len(klines) if klines else 0}根）"}
     dates = [k.date for k in klines]
@@ -540,7 +572,7 @@ def handle_realtime_flow(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
-    flows = fetch_realtime_flow(symbol)
+    flows = fetch_required("realtime_flow", lambda: {"flows": fetch_realtime_flow(symbol)})["flows"]
     if not flows:
         return {"error": "暂无实时资金流数据（非交易日或盘前）", "flows": []}
     # 最后一根是当日累计总值
@@ -853,10 +885,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _html(self, content: bytes, content_type: str = "text/html"):
+    def _html(self, content: bytes, content_type: str = "text/html", immutable: bool = False):
         self.send_response(200)
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-        self._send_no_cache_headers()
+        if immutable:
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self._send_no_cache_headers()
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
@@ -868,11 +903,15 @@ class Handler(BaseHTTPRequestHandler):
 
         # API路由
         if path.startswith("/api/"):
+            started = time.monotonic()
+            token = request_id.set(uuid.uuid4().hex[:12])
             try:
                 if path == "/api/health":
                     self._json({"status": "ok", "time": time.strftime("%H:%M:%S")})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))
+                elif path == "/api/market_breadth":
+                    self._json(market_breadth_cache.snapshot())
                 elif path == "/api/quote":
                     self._json(handle_quote(params))
                 elif path == "/api/search":
@@ -891,9 +930,19 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(handle_scan(params))
                 else:
                     self._json({"error": "未知API"}, 404)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                log.info("客户端已取消请求: %s", path)
+            except OSError as e:
+                log.warning("API数据获取失败: %s", e)
+                self._json({"error": str(e)}, 503)
             except Exception as e:
                 log.error(f"API错误: {e}", exc_info=True)
                 self._json({"error": str(e)}, 500)
+            finally:
+                log.info("api_done request_id=%s path=%s symbol=%s period=%s elapsed_ms=%.1f",
+                         request_id.get(), path, params.get("symbol", [""])[0],
+                         params.get("period", ["day"])[0], (time.monotonic() - started) * 1000)
+                request_id.reset(token)
             return
 
         # 静态文件（看板）
@@ -903,7 +952,7 @@ class Handler(BaseHTTPRequestHandler):
             # 安全处理静态文件路径
             safe_path = path.lstrip("/")
             filepath = os.path.normpath(os.path.join(DASHBOARD_DIR, safe_path))
-            if not filepath.startswith(DASHBOARD_DIR):
+            if os.path.commonpath([filepath, DASHBOARD_DIR]) != DASHBOARD_DIR:
                 self._json({"error": "禁止访问"}, 403)
                 return
 
@@ -915,7 +964,7 @@ class Handler(BaseHTTPRequestHandler):
                 ".svg": "image/svg+xml", ".ico": "image/x-icon",
             }.get(ext, "application/octet-stream")
             with open(filepath, "rb") as f:
-                self._html(f.read(), ct)
+                self._html(f.read(), ct, immutable=path == "/vendor/echarts-5.5.0.min.js")
         else:
             self._json({"error": "文件不存在"}, 404)
 
@@ -932,6 +981,7 @@ def main():
     # ThreadingHTTPServer: 多线程处理，浏览器并发请求不会卡死
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
+    market_breadth_cache.start()
     log.info(f"趋势分析实时买卖点工具启动 → http://{HOST}:{PORT}")
     log.info(f"API: /api/analyze?symbol=600000")
     try:
@@ -939,6 +989,7 @@ def main():
     except KeyboardInterrupt:
         log.info("服务停止")
     finally:
+        market_breadth_cache.stop()
         # 无论正常还是异常退出，都释放监听端口与资源
         server.shutdown()
         server.server_close()

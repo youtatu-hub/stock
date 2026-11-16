@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>趋势分析实时买卖点</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="/vendor/echarts-5.5.0.min.js"></script>
+<script src="/request-loader.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; }
@@ -12,15 +13,16 @@ body {
   font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif;
   background: #000;
   color: #ccc;
+  display: flex; flex-direction: column;
 }
 
 /* ===== 顶部栏 ===== */
 .topbar {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 6px 16px;
   background: linear-gradient(180deg, #161616, #0d0d0d);
   border-bottom: 1px solid #2a2a2a;
-  height: 48px; flex-shrink: 0;
+  min-height: 48px; flex-shrink: 0;
   box-shadow: 0 1px 4px rgba(0,0,0,0.5);
 }
 .logo { font-size: 15px; font-weight: bold; color: #ff9800; white-space: nowrap; letter-spacing: 1px; }
@@ -49,6 +51,7 @@ body {
 /* 行情显示 */
 .quote-bar {
   display: flex; align-items: center; gap: 16px; margin-left: auto;
+  white-space: nowrap;
 }
 .qb-name { font-size: 15px; font-weight: bold; color: #fff; }
 .qb-price { font-size: 24px; font-weight: bold; }
@@ -122,7 +125,7 @@ body {
 /* ===== 主布局 ===== */
 .main {
   display: grid; grid-template-columns: 1fr 340px;
-  gap: 1px; background: #1a1a1a; height: calc(100vh - 48px);
+  gap: 1px; background: #1a1a1a; flex: 1; min-height: 0;
 }
 .left-panel { background: #000; display: flex; flex-direction: column; overflow: hidden; }
 .right-panel { background: #0a0a0a; overflow-y: auto; padding: 10px; }
@@ -308,17 +311,29 @@ body {
 .plan-rr-item { color: #888; }
 .plan-rr-item b { color: #ddd; }
 
-/* ===== 热门股票快捷入口 ===== */
-.hot-stocks {
-  display: flex; gap: 4px; margin-left: 4px;
+/* ===== 关注目录与品种 ===== */
+.focus-groups {
+  display: flex; gap: 4px; min-width: 0; overflow-x: auto;
 }
-.hs-btn {
-  padding: 3px 8px; font-size: 11px;
+.focus-group-btn, .focus-stock-btn {
+  padding: 5px 9px; font-size: 12px;
   background: #1a1a1a; border: 1px solid #2a2a2a;
-  color: #888; cursor: pointer; border-radius: 3px;
+  color: #aaa; cursor: pointer; border-radius: 4px;
   transition: all 0.1s; white-space: nowrap;
 }
-.hs-btn:hover { color: #ff9800; border-color: #ff9800; background: #1a1200; }
+.focus-group-btn:hover, .focus-stock-btn:hover,
+.focus-group-btn.active, .focus-stock-btn.active {
+  color: #ff9800; border-color: #ff9800; background: #1a1200;
+}
+.focus-group-count { margin-left: 5px; font-size: 10px; opacity: 0.65; }
+.focus-members {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  min-height: 44px; padding: 7px 16px; overflow-x: auto;
+  background: #0d0d0d; border-bottom: 1px solid #222;
+}
+.focus-members-label { color: #666; font-size: 11px; white-space: nowrap; margin-right: 4px; }
+.focus-stock-code { margin-left: 8px; font-size: 11px; opacity: 0.65; font-family: monospace; }
+.focus-empty { color: #777; font-size: 12px; white-space: nowrap; }
 
 /* ===== 缠论信号面板 ===== */
 .chanlun-card {
@@ -445,6 +460,12 @@ body {
 .wp-tab .wp-tab-count { font-size: 10px; color: #555; margin-left: 2px; }
 .wp-tab.active .wp-tab-count { color: #ff9800; }
 .wp-list { flex: 1; overflow-y: auto; padding: 4px; }
+.wp-group-title {
+  padding: 9px 10px 5px; color: #ff9800; font-size: 11px; font-weight: normal;
+  border-top: 1px solid #292929;
+}
+.wp-group:first-child .wp-group-title { border-top: none; }
+.wp-group-title span { margin-left: 6px; color: #777; }
 .wp-item {
   display: flex; align-items: center; gap: 8px;
   padding: 7px 10px; border-radius: 4px; cursor: pointer;
@@ -614,16 +635,10 @@ body {
 <div class="topbar">
   <div class="logo">趋势分析</div>
   <div class="search-wrap">
-    <input type="text" id="search-input" placeholder="代码/名称 如 600519" autocomplete="off">
+    <input type="text" id="search-input" placeholder="代码/名称 如 511360" autocomplete="off">
     <div class="search-results" id="search-results"></div>
   </div>
-  <div class="hot-stocks">
-    <button class="hs-btn" onclick="analyze('600519')">茅台</button>
-    <button class="hs-btn" onclick="analyze('601899')">紫金矿业</button>
-    <button class="hs-btn" onclick="analyze('600276')">恒瑞医药</button>
-    <button class="hs-btn" onclick="analyze('588170')">科创半导体</button>
-    <button class="hs-btn" onclick="analyze('000001')">平安银行</button>
-  </div>
+  <nav class="focus-groups" id="focus-groups" aria-label="关注目录"></nav>
   <button class="scan-btn" id="scan-btn" onclick="openScan()">扫描买入</button>
   <div class="mode-toggle">
     <button class="mt-btn active" id="mt-pro" onclick="setMode('pro')">专业</button>
@@ -653,6 +668,14 @@ body {
   </div>
 </div>
 
+<div class="focus-members" id="focus-members" aria-label="目录中的关注品种"></div>
+
+<div id="load-status" role="status" aria-live="polite" style="display:flex;gap:18px;padding:6px 16px;color:#999;font-size:12px;flex-wrap:wrap">
+  <span id="status-quote">报价：等待</span>
+  <span id="status-kline">K 线：等待</span>
+  <span id="status-analysis">分析：等待</span>
+  <span id="status-chanlun">缠论：等待</span>
+</div>
 <div class="main">
   <!-- ===== 左侧：图表 ===== -->
   <div class="left-panel">
@@ -790,6 +813,8 @@ let klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorCh
 let _klineData = [];
 let _zoomBound = false;
 let _refreshTimer = null;
+let _loadSession = null;
+let _minuteSession = null;
 let _minuteData = null;      // 缓存分时数据
 let _minuteChanlun = null;   // 缓存缠论分时分析结果
 let _minuteYRange = null;    // 固定Y轴范围
@@ -853,11 +878,12 @@ function initCharts() {
   minuteVolChart.setOption(opts);
   indicatorChart.setOption(opts);
 
-  window.addEventListener('resize', () => {
+  const chartResizeObserver = new ResizeObserver(() => {
     klineChart.resize(); volumeChart.resize(); flowChart.resize();
     minuteChart.resize(); minuteVolChart.resize();
     indicatorChart.resize();
   });
+  chartResizeObserver.observe(document.querySelector('.main'));
 
   // 视图切换
   document.getElementById('view-dayk').onclick = () => switchView('dayk');
@@ -879,6 +905,7 @@ function initCharts() {
 function switchView(view) {
   const prevView = currentView;
   currentView = view;
+  if (_minuteSession) _minuteSession.cancel();
   const dk = document.getElementById('view-dayk');
   const wk = document.getElementById('view-week');
   const mn = document.getElementById('view-minute');
@@ -906,7 +933,7 @@ function switchView(view) {
     setTimeout(() => {
       minuteChart.resize();
       minuteVolChart.resize();
-      if (currentSymbol) loadMinute(currentSymbol);
+      if (currentSymbol && currentView === 'minute') loadMinute(currentSymbol);
     }, 50);
   } else {
     // dayk 或 week
@@ -951,7 +978,7 @@ function calcMA(data, period) {
 }
 
 // ===== K线图 =====
-function renderKline(klines, signal) {
+function renderKline(klines, signal = {}) {
   _klineData = klines;
   _lastSignalData = signal;
   const dates = klines.map(k => k.date);
@@ -1829,14 +1856,19 @@ function switchFlowMode(mode) {
 }
 
 async function loadRealtimeFlow(symbol) {
-  if (!symbol) return;
+  const session = _loadSession;
+  if (!symbol || !session || !session.active || session.flowRefreshing) return;
+  session.flowRefreshing = true;
   try {
-    const r = await fetch(`${API}/api/realtime_flow?symbol=${symbol}`);
-    const data = await r.json();
-    renderRealtimeFlow(data);
+    const data = await session.request(`${API}/api/realtime_flow?symbol=${encodeURIComponent(symbol)}`);
+    if (session.active && _flowMode === 'realtime') renderRealtimeFlow(data);
   } catch(e) {
-    const fs = document.getElementById('flow-summary');
-    fs.textContent = '实时资金流获取失败';
+    if (session.active && _flowMode === 'realtime') {
+      document.getElementById('flow-summary').textContent = e.message;
+      console.warn('[realtime_flow]', e);
+    }
+  } finally {
+    session.flowRefreshing = false;
   }
 }
 
@@ -2168,7 +2200,7 @@ function renderKeyLevels(levels) {
 }
 
 // ===== 大盘环境 =====
-function renderMarket(signal, breadth) {
+function renderMarket(signal, breadth, status = {}) {
   const card = document.getElementById('market-card');
   const el = document.getElementById('market-body');
   if (!signal.canslim) { card.style.display = 'none'; return; }
@@ -2186,7 +2218,7 @@ function renderMarket(signal, breadth) {
   if (breadth && breadth.total >= 50) {
     const upN = breadth.up || 0;
     const downN = breadth.down || 0;
-    const br = breadth.breadth_ratio || 0.5;
+    const br = breadth.breadth_ratio ?? 0.5;
     const brPct = (br * 100).toFixed(0);
     const brColor = br >= 0.6 ? C.up : br >= 0.4 ? '#ffc107' : C.down;
     const brLabel = br >= 0.7 ? '普涨' : br >= 0.6 ? '多数上涨' : br >= 0.4 ? '多数下跌' : '普跌';
@@ -2201,14 +2233,20 @@ function renderMarket(signal, breadth) {
       </div>
     </div>`;
   }
+  const updatedAt = status.updated_at ? new Date(status.updated_at).toLocaleString('zh-CN', { hour12: false }) : '';
+  const freshness = updatedAt
+    ? `宽度更新时间：${updatedAt}${status.stale ? '（旧数据）' : ''}${status.last_error ? '，最近刷新失败' : ''}`
+    : '市场宽度尚未就绪，后台正在刷新';
+  breadthHtml += `<div style="margin-top:6px;color:${status.stale ? '#ffc107' : '#888'}">${escHtml(freshness)}</div>`;
+  if (status.last_error) breadthHtml += '<div style="color:#888">保留上一次完整结果，后台将继续重试</div>';
 
   // 大盘环境卡片：显示M评分+影响+建议（使用真实涨跌家数）
   let advice = '';
   if (isBearish && breadth && breadth.breadth_ratio >= 0.55) {
     // 趋势偏空但今日实际多数上涨 → 不再硬说"3/4下跌"
-    advice = '<div style="color:#ffc107;margin-top:4px;font-size:11px">大盘趋势偏空，但今日多数个股上涨，短线可关注反弹</div>';
+    advice = '<div style="color:#ffc107;margin-top:4px;font-size:11px">大盘趋势偏空，宽度快照中多数个股上涨，短线可关注反弹</div>';
   } else if (isBearish) {
-    advice = `<div style="color:#ff2d2d;margin-top:4px;font-size:11px">大盘偏空${breadth ? `，今日${breadth.up}涨/${breadth.down}跌` : ''}，建议降低仓位或等待大盘转暖</div>`;
+    advice = `<div style="color:#ff2d2d;margin-top:4px;font-size:11px">大盘偏空${breadth ? `，宽度快照${breadth.up}涨/${breadth.down}跌` : ''}，建议降低仓位或等待大盘转暖</div>`;
   } else if (m >= 65) {
     advice = '<div style="color:#00b35c;margin-top:4px;font-size:11px">大盘环境偏多，适合积极操作</div>';
   } else {
@@ -2217,7 +2255,7 @@ function renderMarket(signal, breadth) {
 
   // 提取M维度信号（含大盘/今日/市场环境关键词）
   const mSignals = (signal.canslim.signals || []).filter(s =>
-    s.includes('市场环境') || s.includes('大盘') || s.includes('M(') || s.includes('今日')
+    s.includes('市场环境') || s.includes('市场宽度') || s.includes('大盘') || s.includes('M(') || s.includes('今日')
   );
   const mSignalText = mSignals.join('；');
 
@@ -2312,36 +2350,91 @@ function selectStock(code, name) {
 }
 
 // ===== 分析 =====
+function setStageStatus(stage, label, state, error = false) {
+  const el = document.getElementById(`status-${stage}`);
+  el.textContent = `${label}：${state}`;
+  el.style.color = error ? '#ffc107' : '#999';
+}
+
 async function analyze(symbol) {
+  if (_loadSession) _loadSession.cancel();
+  if (_minuteSession) _minuteSession.cancel();
+  const session = _loadSession = new StockLoadSession();
   currentSymbol = symbol;
-  document.getElementById('loading').style.display = 'flex';
+  searchInput.value = symbol;
+  const focusGroup = focusGroupFor(symbol);
+  if (focusGroup) _activeFocusGroup = focusGroup.id;
+  renderFocusNavigation();
+  document.getElementById('loading').style.display = 'none';
   if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
-
-  // 周K视图传period=week，否则默认day
+  _klineData = [];
+  _dailyChanlun = null;
+  _minuteData = null;
+  _minuteChanlun = null;
+  _dailyFlows = null;
+  _lastSignalData = null;
+  _currentStockName = '';
+  for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) chart.clear();
+  for (const id of ['module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid', 'sa-stats', 'sa-detail', 'flow-summary']) {
+    document.getElementById(id).textContent = '';
+  }
+  for (const id of ['plan-card', 'market-card', 'risk-card', 'chanlun-card']) {
+    document.getElementById(id).style.display = 'none';
+  }
+  document.getElementById('quote-bar').textContent = `${symbol} 报价加载中…`;
+  document.getElementById('sum-body').textContent = '分析加载中…';
+  document.getElementById('chanlun-daily-body').textContent = '缠论加载中…';
+  document.getElementById('chanlun-daily-card').style.display = currentView === 'minute' ? 'none' : 'block';
+  document.getElementById('chanlun-daily-label').textContent = currentView === 'week' ? '缠论周线分析' : '缠论日线分析';
+  setStageStatus('quote', '报价', '加载中');
+  setStageStatus('kline', 'K 线', '加载中');
+  setStageStatus('analysis', '分析', '加载中');
+  setStageStatus('chanlun', '缠论', '加载中');
+  updateStarButton(symbol);
   const periodParam = currentView === 'week' ? '&period=week' : '';
+  const query = `symbol=${encodeURIComponent(symbol)}${periodParam}`;
+  let analysisData = null;
+  let chartReady = false;
 
-  try {
-    const [r, clRes] = await Promise.all([
-      fetch(`${API}/api/analyze?symbol=${symbol}${periodParam}`),
-      fetch(`${API}/api/chanlun_daily?symbol=${symbol}${periodParam}`),
-    ]);
-    const data = await r.json();
-    _dailyChanlun = null;
-    try { _dailyChanlun = await clRes.json(); } catch(e) {}
-    document.getElementById('loading').style.display = 'none';
+  // 按轻重顺序发出请求，每个阶段收到响应即渲染。
+  session.quoteRefreshing = true;
+  session.run('quote', `${API}/api/quote?${query}`, q => {
+    session.quoteReady = true;
+    updateQuote(q);
+    setStageStatus('quote', '报价', '已更新');
+  }, error => {
+    setStageStatus('quote', '报价', error.message, true);
+    if (!session.quoteReady) document.getElementById('quote-bar').textContent = `${symbol} 报价暂不可用`;
+  }).finally(() => { session.quoteRefreshing = false; });
 
-    if (data.error) {
-      document.getElementById('sum-body').innerHTML = `<div class="sum-text" style="color:${C.down}">${data.error}</div>`;
-      return;
+  session.run('kline', `${API}/api/kline?${query}&count=250&basic=1`, data => {
+    if (!data.klines.length) throw new Error('暂无 K 线数据');
+    renderKline(analysisData ? analysisData.klines : data.klines.slice(-120), analysisData ? analysisData.signal : {});
+    chartReady = true;
+    if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
+    setStageStatus('kline', 'K 线', '已更新');
+  }, error => {
+    if (!chartReady) setStageStatus('kline', 'K 线', error.message, true);
+  });
+
+  session.run('analysis', `${API}/api/analyze?${query}`, data => {
+    analysisData = data;
+    if (!session.quoteReady && data.quote) {
+      updateQuote(data.quote);
+      session.quoteReady = true;
+      setStageStatus('quote', '报价', '已更新');
     }
-
-    updateQuote(data.quote);
     renderKline(data.klines, data.signal);
+    chartReady = true;
+    if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
+    setStageStatus('kline', 'K 线', '已更新');
     renderFlow(data.flows);
     renderSignal(data.signal);
     renderCanslim(data.signal.canslim);
     renderKeyLevels(data.signal.key_levels);
-    renderMarket(data.signal, data.breadth);
+    renderMarket(data.signal, data.breadth, data.breadth_status);
+    const degraded = Object.keys(data.degraded || {}).length > 0;
+    setStageStatus('analysis', '分析', degraded ? '已完成（部分数据降级）' : '已完成', degraded);
 
     // 记录历史 & 更新自选星标
     const _sName = data.quote ? data.quote.name : symbol;
@@ -2372,35 +2465,36 @@ async function analyze(symbol) {
     // 渲染信号准确率统计
     renderSignalAccuracy(symbol);
 
-    // 缠论日线/周线分析
-    document.getElementById('chanlun-daily-label').textContent = currentView === 'week' ? '缠论周线分析' : '缠论日线分析';
-    if (_dailyChanlun && !_dailyChanlun.error) {
-      renderChanlunDaily(_dailyChanlun);
-      applyChanlunDailyOverlay(_dailyChanlun);
-      document.getElementById('chanlun-daily-card').style.display = 'block';
-    } else {
-      document.getElementById('chanlun-daily-card').style.display = 'none';
-    }
+  }, error => {
+    setStageStatus('analysis', '分析', '暂不可用', true);
+    document.getElementById('sum-body').textContent = `分析失败：${error.message}`;
+    document.getElementById('flow-summary').textContent = '分析资金流暂不可用';
+  });
 
-    // 缠论分时面板在分时视图才显示
-    if (currentView !== 'minute') {
-      document.getElementById('chanlun-card').style.display = 'none';
-    }
+  session.run('chanlun', `${API}/api/chanlun_daily?${query}&count=250`, data => {
+    _dailyChanlun = data;
+    if (currentView !== 'minute') renderChanlunDaily(data);
+    if (chartReady) applyChanlunDailyOverlay(data);
+    setStageStatus('chanlun', '缠论', '已完成');
+  }, error => {
+    setStageStatus('chanlun', '缠论', '暂不可用', true);
+    document.getElementById('chanlun-daily-body').textContent = `缠论分析失败：${error.message}`;
+  });
 
-    if (currentView === 'minute') loadMinute(symbol);
-    _refreshTimer = setInterval(() => refreshQuote(symbol), 2000);
-  } catch(e) {
-    document.getElementById('loading').style.display = 'none';
-    document.getElementById('sum-body').innerHTML = `<div class="sum-text" style="color:${C.down}">请求失败，请检查服务是否运行</div>`;
-  }
+  if (currentView === 'minute') loadMinute(symbol);
+  _refreshTimer = setInterval(() => refreshQuote(symbol), 2000);
 }
 
 async function refreshQuote(symbol) {
+  const session = _loadSession;
+  if (!session || !session.active || session.quoteRefreshing) return;
+  session.quoteRefreshing = true;
   try {
-    const r = await fetch(`${API}/api/quote?symbol=${symbol}`);
-    const q = await r.json();
-    if (!q.error) {
+    const q = await session.request(`${API}/api/quote?symbol=${encodeURIComponent(symbol)}`);
+    if (session.active) {
       updateQuote(q);
+      session.quoteReady = true;
+      setStageStatus('quote', '报价', '已更新');
       // K线最后一根蜡烛跟随实时行情更新
       refreshKlineLastCandle(q);
       if (currentView === 'minute') {
@@ -2412,7 +2506,14 @@ async function refreshQuote(symbol) {
         loadRealtimeFlow(symbol);
       }
     }
-  } catch(e) {}
+  } catch(e) {
+    if (session.active) {
+      setStageStatus('quote', '报价', '刷新失败，保留已显示数据', true);
+      console.warn('[quote_refresh]', e);
+    }
+  } finally {
+    session.quoteRefreshing = false;
+  }
 }
 
 // 用最新行情刷新K线最后一根蜡烛（日线实时感）
@@ -2457,42 +2558,40 @@ function refreshKlineLastCandle(q) {
 }
 
 async function loadMinute(symbol) {
-  try {
-    // 确保容器有尺寸（从hidden切过来时ECharts可能还是0x0）
-    minuteChart.resize();
-    minuteVolChart.resize();
-    // 重置Y轴范围（切换股票时）
-    _minuteYRange = null;
-    // 并行获取分时数据和缠论分析
-    const [minuteRes, chanlunRes] = await Promise.all([
-      fetch(`${API}/api/minute?symbol=${symbol}`),
-      fetch(`${API}/api/chanlun_minute?symbol=${symbol}`),
-    ]);
-    const data = await minuteRes.json();
-    if (data.error) {
-      minuteChart.setOption({ title: { text: data.error, left: 'center', top: 'center', textStyle: { color: C.down, fontSize: 14 } } }, true);
-      document.getElementById('chanlun-card').style.display = 'none';
-      return;
-    }
+  if (_minuteSession) _minuteSession.cancel();
+  const session = _minuteSession = new StockLoadSession();
+  minuteChart.resize();
+  minuteVolChart.resize();
+  minuteChart.clear();
+  minuteVolChart.clear();
+  _minuteYRange = null;
+  _minuteData = null;
+  _minuteChanlun = null;
+  document.getElementById('chanlun-card').style.display = 'block';
+  document.getElementById('chanlun-body').textContent = '分时缠论加载中…';
+  session.run('minute', `${API}/api/minute?symbol=${encodeURIComponent(symbol)}`, data => {
     _minuteData = data;
-    let chanlunData = null;
-    try {
-      chanlunData = await chanlunRes.json();
-      _minuteChanlun = chanlunData;
-    } catch(e) { chanlunData = null; }
-    renderMinute(data, chanlunData);
-    renderChanlun(chanlunData);
-  } catch(e) {
-    minuteChart.setOption({ title: { text: '分时数据获取失败', left: 'center', top: 'center', textStyle: { color: C.down, fontSize: 14 } } }, true);
-  }
+    renderMinute(data, _minuteChanlun);
+  }, error => {
+    minuteChart.setOption({ title: { text: error.message, left: 'center', top: 'center', textStyle: { color: C.down, fontSize: 14 } } }, true);
+  });
+  session.run('chanlun_minute', `${API}/api/chanlun_minute?symbol=${encodeURIComponent(symbol)}`, data => {
+    _minuteChanlun = data;
+    renderChanlun(data);
+    if (_minuteData) renderMinute(_minuteData, data);
+  }, error => {
+    document.getElementById('chanlun-body').textContent = `分时缠论暂不可用：${error.message}`;
+  });
 }
 
 // 分时数据轻量刷新：只更新最后一个点的价格，不全量重载
 async function refreshMinuteLight(symbol) {
+  const session = _minuteSession;
+  if (!session || !session.active || session.refreshing || !_minuteData) return;
+  session.refreshing = true;
   try {
-    const r = await fetch(`${API}/api/minute?symbol=${symbol}`);
-    const data = await r.json();
-    if (data.error || !_minuteData) return;
+    const data = await session.request(`${API}/api/minute?symbol=${encodeURIComponent(symbol)}`);
+    if (!session.active || !_minuteData) return;
     // 检查数据是否实际变化（长度或最后一个价格）
     const oldLen = _minuteData.prices.length;
     const newLen = data.prices.length;
@@ -2521,15 +2620,95 @@ async function refreshMinuteLight(symbol) {
     minuteVolChart.setOption({
       series: [{ data: vc }],
     });
-  } catch(e) {}
+  } catch(e) {
+    if (session.active) console.warn('[minute_refresh]', e);
+  } finally {
+    session.refreshing = false;
+  }
 }
 
 // ===== 自选股 & 历史记录 =====
 const STORAGE_WATCH = 'qs_watchlist';
 const STORAGE_HISTORY = 'qs_history';
+const STORAGE_FOCUS_SEEDED = 'qs_focus_seeded_v1';
+const FOCUS_GROUPS = [
+  { id: 'steady', name: '稳健压舱石', stocks: [
+    { code: '511360', name: '短融ETF海富通' },
+  ] },
+  { id: 'core', name: '核心进攻', stocks: [
+    { code: '512050', name: 'A500ETF华夏' },
+  ] },
+  { id: 'dividend', name: '红利防御', stocks: [
+    { code: '512890', name: '红利低波ETF' },
+  ] },
+  { id: 'us-premium', name: '美股溢价观察', stocks: [
+    { code: '513500', name: '标普500ETF博时' },
+    { code: '513300', name: '纳斯达克ETF华夏' },
+    { code: '159501', name: '纳指ETF嘉实' },
+    { code: '159941', name: '纳指ETF广发' },
+    { code: '513100', name: '纳指ETF国泰' },
+  ] },
+];
 const MAX_HISTORY = 30;
+let _activeFocusGroup = FOCUS_GROUPS[0].id;
 let _currentTab = 'watch';
 let _panelOpen = false;
+
+function focusGroupFor(code) {
+  return FOCUS_GROUPS.find(group => group.stocks.some(stock => stock.code === code));
+}
+
+function groupedWatchlist(list) {
+  const byCode = new Map(list.map(stock => [stock.code, stock]));
+  const groups = FOCUS_GROUPS.map(group => ({
+    id: group.id, name: group.name,
+    stocks: group.stocks.map(stock => byCode.get(stock.code)).filter(Boolean),
+  }));
+  const others = list.filter(stock => !focusGroupFor(stock.code));
+  if (others.length) groups.push({ id: 'other', name: '其他关注', stocks: others });
+  return groups;
+}
+
+function initializeFocusWatchlist() {
+  if (localStorage.getItem(STORAGE_FOCUS_SEEDED)) return;
+  const list = getWatchlist();
+  const existingCodes = new Set(list.map(stock => stock.code));
+  for (const group of FOCUS_GROUPS) {
+    for (const stock of group.stocks) {
+      if (!existingCodes.has(stock.code)) {
+        list.push({ ...stock, addedAt: Date.now() });
+        existingCodes.add(stock.code);
+      }
+    }
+  }
+  saveWatchlist(list);
+  // 只迁入一次；之后取消关注或清空自选不会被刷新页面重新加回。
+  localStorage.setItem(STORAGE_FOCUS_SEEDED, '1');
+}
+
+function selectFocusGroup(groupId) {
+  _activeFocusGroup = groupId;
+  renderFocusNavigation();
+}
+
+function renderFocusNavigation() {
+  const groups = groupedWatchlist(getWatchlist());
+  document.getElementById('focus-groups').innerHTML = groups.filter(group => group.id !== 'other').map(group => `
+    <button class="focus-group-btn${group.id === _activeFocusGroup ? ' active' : ''}"
+      aria-pressed="${group.id === _activeFocusGroup}" onclick="selectFocusGroup('${group.id}')">
+      ${group.name}<span class="focus-group-count">${group.stocks.length}</span>
+    </button>`).join('');
+  const group = groups.find(item => item.id === _activeFocusGroup);
+  const members = document.getElementById('focus-members');
+  members.innerHTML = '<span class="focus-members-label">关注品种</span>' + (group.stocks.length
+    ? group.stocks.map(stock => `
+      <button class="focus-stock-btn${stock.code === currentSymbol ? ' active' : ''}"
+        aria-pressed="${stock.code === currentSymbol}" title="${escHtml(stock.name)} ${stock.code}"
+        onclick="analyze('${stock.code}')">
+        ${escHtml(stock.name)}<span class="focus-stock-code">${stock.code}</span>
+      </button>`).join('')
+    : '<span class="focus-empty">该目录暂无关注，可搜索对应品种后点击 ☆ 添加</span>');
+}
 
 // --- localStorage 读写 ---
 function getWatchlist() {
@@ -2537,6 +2716,7 @@ function getWatchlist() {
 }
 function saveWatchlist(list) {
   localStorage.setItem(STORAGE_WATCH, JSON.stringify(list));
+  renderFocusNavigation();
 }
 function getHistory() {
   try { return JSON.parse(localStorage.getItem(STORAGE_HISTORY) || '[]'); } catch(e) { return []; }
@@ -2607,7 +2787,10 @@ function renderWatchlist() {
     el.innerHTML = '<div class="wp-empty"><span class="wp-empty-icon">☆</span>还没有自选股<br>分析股票后点击 ☆ 添加</div>';
     return;
   }
-  el.innerHTML = list.map(s => {
+  el.innerHTML = groupedWatchlist(list).filter(group => group.stocks.length).map(group => `
+    <section class="wp-group">
+      <h3 class="wp-group-title">${group.name}<span>${group.stocks.length}</span></h3>
+      ${group.stocks.map(s => {
     const tag = sigTag(s.action, s.score);
     return `<div class="wp-item" onclick="analyze('${s.code}');closePanel()">
       <span class="code">${s.code}</span>
@@ -2615,7 +2798,8 @@ function renderWatchlist() {
       ${tag}
       <button class="remove" onclick="event.stopPropagation();removeFromWatchlist('${s.code}')" title="移除">×</button>
     </div>`;
-  }).join('');
+      }).join('')}
+    </section>`).join('');
 }
 
 function renderHistory() {
@@ -2672,7 +2856,6 @@ function closePanel() {
 }
 
 function togglePanel(tab) {
-  _currentTab = tab;
   const panel = document.getElementById('wp-panel');
   if (_panelOpen && panel.classList.contains('show')) {
     // 已打开，切换tab
@@ -2767,13 +2950,15 @@ updateQuote = function(q) {
 };
 
 // ===== 启动 =====
+initializeFocusWatchlist();
+renderFocusNavigation();
 initCharts();
 updateBadges();
 // 加载模式设置
 loadMode();
-// 自动加载上次分析的股票（没有则默认茅台）
+// 自动加载上次分析的品种；首次使用默认打开关注目录中的短融ETF。
 const _hist = getHistory();
-const _lastSymbol = (_hist.length > 0) ? _hist[0].code : '600519';
+const _lastSymbol = (_hist.length > 0) ? _hist[0].code : FOCUS_GROUPS[0].stocks[0].code;
 analyze(_lastSymbol);
 
 // ===== 小白/专业模式切换 =====
@@ -3095,10 +3280,11 @@ async function loadOverview() {
     }
   }));
 
-  // 按涨跌幅排序
-  results.sort((a, b) => (b.pct || -999) - (a.pct || -999));
-
-  el.innerHTML = results.map(s => {
+  // 同一关注目录内按涨跌幅排序。
+  el.innerHTML = groupedWatchlist(results).filter(group => group.stocks.length).map(group => `
+    <section class="wp-group">
+      <h3 class="wp-group-title">${group.name}<span>${group.stocks.length}</span></h3>
+      ${group.stocks.sort((a, b) => (b.pct ?? -Infinity) - (a.pct ?? -Infinity)).map(s => {
     const pctCls = s.pct > 0 ? 'up' : s.pct < 0 ? 'down' : 'flat';
     const pctStr = s.pct != null ? (s.pct > 0 ? '+' : '') + s.pct.toFixed(2) + '%' : '--';
     const sigTag = s.action ? `<span class="wp-ov-sig-tag ${s.action === '买入' ? 'buy' : s.action === '卖出' ? 'sell' : 'watch'}">${s.action}</span>` : '<span class="wp-ov-sig-tag none">--</span>';
@@ -3111,7 +3297,8 @@ async function loadOverview() {
       <span class="wp-ov-score" style="color:${scoreColor}">${scoreStr}</span>
       <span class="wp-ov-sig">${sigTag}</span>
     </div>`;
-  }).join('');
+      }).join('')}
+    </section>`).join('');
 }
 
 // ===== 信号准确率统计 =====

@@ -16,7 +16,9 @@ import sys
 import time
 import socket
 import logging
-from dataclasses import dataclass
+import threading
+import concurrent.futures
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 # 便携依赖目录：无内置 python/ 时，从发行包 libs/ 加载第三方依赖
@@ -25,6 +27,11 @@ if os.path.isdir(_LIBS_DIR):
     sys.path.insert(0, _LIBS_DIR)
 
 import requests
+from urllib3.util import Timeout
+
+from data.request_runtime import (
+    HTTP_ATTEMPT_SECONDS, collect_stages, data_stage, remaining_seconds, request_id,
+)
 
 log = logging.getLogger("trend_data")
 
@@ -74,58 +81,71 @@ UA_POOL = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101",
 ]
 
-# ---- 模块级session ----
-_session: Optional[requests.Session] = None
-_ua_idx = 0
+# Session 的 headers/cookies 不跨线程共享。
+_sessions = threading.local()
+_cache_lock = threading.Lock()
 
 _cache: Dict[str, Tuple[Any, float]] = {}
 _CACHE_TTL = 15
 
 
 def _get_session() -> requests.Session:
-    global _session
-    if _session is None:
+    session = getattr(_sessions, "session", None)
+    if session is None:
         _patch_dns()  # 启用DNS重定向
-        _session = requests.Session()
-        _session.trust_env = False
-        _session.proxies = {"http": None, "https": None}
-        _session.headers.update({
+        session = requests.Session()
+        session.trust_env = False
+        session.proxies = {"http": None, "https": None}
+        session.headers.update({
             "User-Agent": UA_POOL[0],
             "Accept": "*/*",
             "Accept-Language": "zh-CN,zh;q=0.9",
             "Referer": "https://quote.eastmoney.com/",
             "Connection": "keep-alive",
         })
-    return _session
+        _sessions.session = session
+    return session
 
 
 def _rotate_ua() -> None:
-    global _ua_idx
-    _ua_idx = (_ua_idx + 1) % len(UA_POOL)
-    _get_session().headers["User-Agent"] = UA_POOL[_ua_idx]
+    _sessions.ua_idx = (getattr(_sessions, "ua_idx", 0) + 1) % len(UA_POOL)
+    _get_session().headers["User-Agent"] = UA_POOL[_sessions.ua_idx]
+
+
+def _http_get(url: str, **kwargs):
+    budget = remaining_seconds(HTTP_ATTEMPT_SECONDS)
+    started = time.monotonic()
+    try:
+        response = _get_session().get(
+            url, timeout=Timeout(total=budget, connect=min(0.8, budget), read=budget), **kwargs)
+        response.raise_for_status()
+        return response
+    finally:
+        log.info("http_fetch request_id=%s url=%s elapsed_ms=%.1f",
+                 request_id.get(), url, (time.monotonic() - started) * 1000)
 
 
 def _cached(key: str) -> Optional[Any]:
-    e = _cache.get(key)
-    if e and time.time() - e[1] < _CACHE_TTL:
-        return e[0]
-    return None
+    return _cache_get(key, _CACHE_TTL)
 
 
 def _set_cache(key: str, val: Any) -> None:
-    _cache[key] = (val, time.time())
+    _cache_set(key, val)
 
 
 def _cache_get(key: str, ttl: float) -> Optional[Any]:
     """带自定义TTL的缓存读取，None表示未命中。"""
-    e = _cache.get(key)
-    if e and time.time() - e[1] < ttl:
+    with _cache_lock:
+        e = _cache.get(key)
+    if e and time.monotonic() - e[1] < ttl:
+        log.info("data_cache request_id=%s key=%s status=hit", request_id.get(), key)
         return e[0]
     return None
 
 
 def _cache_set(key: str, val: Any) -> None:
-    _cache[key] = (val, time.time())
+    with _cache_lock:
+        _cache[key] = (val, time.monotonic())
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -139,11 +159,10 @@ def _to_float(v: Any) -> Optional[float]:
 
 def _get_json_eastmoney(path: str, params: dict, host_pool: List[str]) -> Optional[dict]:
     """东财API请求，带host池轮换。path如/api/qt/stock/get"""
-    s = _get_session()
     current_url = host_pool[0] + path
     for attempt in range(len(host_pool)):
         try:
-            r = s.get(current_url, params=params, timeout=8)
+            r = _http_get(current_url, params=params)
             if r.status_code == 200:
                 data = r.json()
                 if data and data.get("data") is not None:
@@ -153,11 +172,11 @@ def _get_json_eastmoney(path: str, params: dict, host_pool: List[str]) -> Option
                         log.debug(f"host返回空klines，尝试下一个: {current_url}")
                     else:
                         return data
-        except Exception as e:
-            log.debug(f"请求失败 try={attempt+1} {current_url}: {e}")
+        except (requests.RequestException, ValueError) as e:
+            log.warning(f"请求失败 try={attempt+1} {current_url}: {e}")
         _rotate_ua()
         current_url = host_pool[(attempt + 1) % len(host_pool)] + path
-        time.sleep(0.3)
+    log.warning("数据源均未返回有效结果: %s", path)
     return None
 
 
@@ -208,8 +227,23 @@ class Kline:
     turnover: float = 0.0  # 换手率(%)
 
 
-def fetch_kline(symbol: str, count: int = 250, period: str = "day", adjust: str = "qfq") -> List[Kline]:
-    """获取K线数据。多源fallback：腾讯前复权→新浪(不复权)→东财push2test。东财补充成交额/换手率。"""
+def fetch_kline(symbol: str, count: int = 250, period: str = "day", adjust: str = "qfq",
+                enrich: bool = True) -> List[Kline]:
+    """首屏和缠论只读取价格；完整分析可独立并行获取补充字段。"""
+    klines = _fetch_price_klines(symbol, count, period, adjust)
+    if not enrich or not klines:
+        return klines
+    return enrich_klines(klines, fetch_kline_extras(symbol, count, period))
+
+
+def enrich_klines(klines: List[Kline], extras: dict) -> List[Kline]:
+    # 只复制匹配项，避免修改正在被首屏/缠论读取的价格缓存。
+    return [replace(k, amount=extras[k.date][0], turnover=extras[k.date][1])
+            if k.date in extras else k for k in klines]
+
+
+@data_stage
+def _fetch_price_klines(symbol: str, count: int, period: str, adjust: str) -> List[Kline]:
     cache_key = f"kline_{symbol}_{count}_{period}_{adjust}"
     cached = _cached(cache_key)
     if cached:
@@ -250,9 +284,6 @@ def fetch_kline(symbol: str, count: int = 250, period: str = "day", adjust: str 
         log.warning(f"过滤{len(klines)-len(valid_klines)}条异常K线 {symbol}")
     klines = valid_klines
 
-    # 补充成交额和换手率（东财API，按日期匹配）
-    _enrich_from_eastmoney(symbol, count, klines)
-
     _set_cache(cache_key, klines)
     return klines
 
@@ -264,8 +295,7 @@ def _fetch_kline_tencent(symbol: str, count: int, period: str, adjust: str) -> L
     params = {"param": f"{tc_symbol},{period},,,{count},{fq}"}
 
     try:
-        s = _get_session()
-        r = s.get(TENCENT_KLINE, params=params, timeout=10)
+        r = _http_get(TENCENT_KLINE, params=params)
         # WAF拦截检测：先尝试JSON解析，只有解析失败或返回HTML验证页才判定拦截
         # 腾讯API返回Content-Type=text/html但内容可能是有效JSON，不能仅靠Content-Type判断
         ct = r.headers.get("Content-Type", "")
@@ -314,7 +344,7 @@ def _fetch_kline_tencent(symbol: str, count: int, period: str, adjust: str) -> L
                     k.pct = round((k.close - klines[-1].close) / klines[-1].close * 100, 2)
                 klines.append(k)
         return klines
-    except Exception as e:
+    except (requests.RequestException, ValueError) as e:
         log.error(f"腾讯K线失败 {symbol}: {e}")
         return []
 
@@ -339,8 +369,7 @@ def _fetch_kline_sina(symbol: str, count: int, period: str) -> List[Kline]:
     params = {"symbol": sina_sym, "scale": scale, "ma": "no", "datalen": str(count)}
 
     try:
-        s = _get_session()
-        r = s.get(SINA_KLINE, params=params, timeout=10)
+        r = _http_get(SINA_KLINE, params=params)
         if r.status_code != 200:
             return []
         items = r.json()
@@ -370,7 +399,7 @@ def _fetch_kline_sina(symbol: str, count: int, period: str) -> List[Kline]:
             klines.append(k)
         # 新浪返回的数据已是正序(旧→新)，无需反转
         return klines
-    except Exception as e:
+    except (requests.RequestException, ValueError) as e:
         log.error(f"新浪K线失败 {symbol}: {e}")
         return []
 
@@ -422,8 +451,13 @@ def _fetch_kline_eastmoney(symbol: str, count: int, period: str) -> List[Kline]:
     return klines
 
 
-def _enrich_from_eastmoney(symbol: str, count: int, klines: List[Kline]) -> None:
-    """从东财K线API补充成交额和换手率。按日期匹配。请求比K线多50%以确保日期覆盖。"""
+@data_stage
+def fetch_kline_extras(symbol: str, count: int = 250, period: str = "day") -> dict:
+    """独立获取对应周期的成交额和换手率，不阻塞基础K线。"""
+    cache_key = f"kline_extras_{symbol}_{count}_{period}"
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
     secid = symbol_to_secid(symbol)
     # 多请求一些数据以确保日期覆盖（东财可能缺少部分历史数据）
     request_count = min(count + 60, 500)
@@ -432,7 +466,7 @@ def _enrich_from_eastmoney(symbol: str, count: int, klines: List[Kline]) -> None
         "ut": "fa5fd1943c7b386f172d6893dbfba10b",
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "klt": "101",
+        "klt": "101" if period == "day" else "102" if period == "week" else "103",
         "fqt": "0",  # 不复权（只取成交额和换手率，价格不用）
         "lmt": str(request_count),
         "end": "20500101",
@@ -440,7 +474,7 @@ def _enrich_from_eastmoney(symbol: str, count: int, klines: List[Kline]) -> None
 
     data = _get_json_eastmoney("/api/qt/stock/kline/get", params, EM_KLINE_HOSTS)
     if not data or not data.get("data") or not data["data"].get("klines"):
-        return
+        return {}
 
     # 构建日期→(amount, turnover)映射
     em_map: Dict[str, Tuple[float, float]] = {}
@@ -452,14 +486,9 @@ def _enrich_from_eastmoney(symbol: str, count: int, klines: List[Kline]) -> None
             turnover = _to_float(parts[10]) or 0.0
             em_map[date] = (amount, turnover)
 
-    # 按日期匹配补充
-    matched = 0
-    for k in klines:
-        if k.date in em_map:
-            k.amount = em_map[k.date][0]
-            k.turnover = em_map[k.date][1]
-            matched += 1
-    log.debug(f"东财补充成交额: {matched}/{len(klines)} 条匹配")
+    if em_map:
+        _set_cache(cache_key, em_map)
+    return em_map
 
 
 # ---- 实时行情 ----
@@ -480,6 +509,7 @@ class Quote:
     timestamp: str = ""
 
 
+@data_stage
 def fetch_quote(symbol: str) -> Optional[Quote]:
     """实时行情。东财stock/get，fltt=2价格不除100。2秒缓存保证秒级实时性。"""
     cache_key = f"quote_{symbol}"
@@ -530,6 +560,7 @@ class FundFlow:
     main_pct: float = 0.0
 
 
+@data_stage
 def fetch_fund_flow(symbol: str, days: int = 30) -> List[FundFlow]:
     """历史资金流。东财fflow/daykline。"""
     cache_key = f"flow_{symbol}_{days}"
@@ -593,6 +624,7 @@ class MinuteFlow:
     super_large_net: float  # 累计超大单净流入(元)
 
 
+@data_stage
 def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
     """盘中实时分时资金流。东财fflow/kline/get，走push2delay，klt=1(1分钟)。
 
@@ -637,6 +669,7 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
 
 
 # ---- 搜索 ----
+@data_stage
 def search_stock(keyword: str, count: int = 10) -> List[Dict]:
     """搜索股票。东财suggest接口。"""
     if not keyword or len(keyword.strip()) < 1:
@@ -670,10 +703,10 @@ def search_stock(keyword: str, count: int = 10) -> List[Dict]:
             "User-Agent": UA_POOL[0],
             "Referer": "https://quote.eastmoney.com/",
         })
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=remaining_seconds(HTTP_ATTEMPT_SECONDS)) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        log.debug(f"搜索失败: {e}")
+    except (OSError, ValueError) as e:
+        log.warning(f"搜索失败: {e}")
         return []
 
     items = body.get("QuotationCodeTable", {}).get("Data") or []
@@ -709,6 +742,7 @@ class MinuteData:
     low: float = 0.0
 
 
+@data_stage
 def fetch_minute(symbol: str) -> Optional[MinuteData]:
     """获取当日分时数据。东财trends2/get。"""
     cache_key = f"minute_{symbol}"
@@ -767,6 +801,7 @@ def fetch_minute(symbol: str) -> Optional[MinuteData]:
 
 
 # ---- 大盘指数 ----
+@data_stage
 def fetch_index_kline(index_code: str = "000001", count: int = 60) -> List[Kline]:
     """获取大盘指数K线数据（上证指数/深证成指等）。
 
@@ -841,8 +876,7 @@ def _fetch_kline_tencent_index(index_code: str, count: int) -> List[Kline]:
 
     params = {"param": f"{tc_symbol},day,,,{count},"}
     try:
-        s = _get_session()
-        r = s.get(TENCENT_KLINE, params=params, timeout=10)
+        r = _http_get(TENCENT_KLINE, params=params)
         text = r.text.strip()
         if text.startswith("<!DOCTYPE") or text.startswith("<html"):
             return []
@@ -872,116 +906,83 @@ def _fetch_kline_tencent_index(index_code: str, count: int) -> List[Kline]:
                     k.pct = round((k.close - klines[-1].close) / klines[-1].close * 100, 2)
                 klines.append(k)
         return klines
-    except Exception as e:
+    except (requests.RequestException, ValueError) as e:
         log.error(f"腾讯指数K线失败 {index_code}: {e}")
         return []
 
 
 # ---- 市场宽度（涨跌家数）----
 def fetch_market_breadth() -> Optional[dict]:
-    """获取A股全市场宽度（涨跌家数）。
+    """兼容扫描调用；此函数始终只读，不触发网络请求。"""
+    from data.market_breadth import market_breadth_cache
+    return market_breadth_cache.snapshot()["data"]
 
-    全量抓取所有A股（约5800+只），10线程并发，约0.3秒完成。
-    push2/push2delay每页最多100条，需要约59页。
-    120秒缓存（涨跌家数分钟级变化不大）。
-    """
-    cache_key = "market_breadth"
-    cached = _cache_get(cache_key, 120)
-    if cached:
-        return cached
 
-    import concurrent.futures
+_breadth_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="breadth-page")
 
-    CLIST_PATH = "/api/qt/clist/get"
+
+@data_stage
+def _fetch_breadth_page(page: int) -> dict:
     base_params = {
         "po": "1",
         "np": "1",
         "fltt": "2",
-        "fields": "f3",
+        "fields": "f3,f12,f13",
+        "fid": "f12",  # 固定代码排序，避免涨跌幅变化造成跨页重复/漏项。
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
         "pz": "100",
+        "pn": str(page),
     }
+    response = _get_json_eastmoney("/api/qt/clist/get", base_params, QUOTE_HOSTS)
+    data = response.get("data") if response else None
+    if not data or not data.get("diff"):
+        raise OSError(f"市场宽度第{page}页获取失败")
+    return data
 
-    def _fetch_page(pn: int) -> list:
-        params = dict(base_params, pn=str(pn))
-        s = _get_session()
-        for host in QUOTE_HOSTS:
-            try:
-                url = host + CLIST_PATH
-                r = s.get(url, params=params, timeout=8)
-                if r.status_code == 200:
-                    data = r.json()
-                    if data and data.get("data"):
-                        return data["data"].get("diff") or []
-            except Exception:
-                continue
-        return []
 
-    # 先取第一页，拿到总数算页数
-    first_page = _fetch_page(1)
-    if not first_page:
-        log.warning("市场宽度获取失败: 第一页为空")
-        return None
-
-    # 从第一页响应中拿total
-    total_stocks = 0
-    for host in QUOTE_HOSTS:
-        try:
-            s = _get_session()
-            r = s.get(host + CLIST_PATH, params=dict(base_params, pn="1"), timeout=8)
-            if r.status_code == 200:
-                total_stocks = r.json().get("data", {}).get("total", 0)
-                if total_stocks:
-                    break
-        except Exception:
-            continue
-
-    total_pages = (total_stocks + 99) // 100 if total_stocks else 59
-    log.info(f"市场宽度: {total_stocks}只A股, {total_pages}页, 开始全量抓取")
-
-    # 全量并发抓取（第1页已取，第2页~末页并发）
-    up = down = flat = 0
-
-    # 统计第一页
-    for d in first_page:
-        pct = _to_float(d.get("f3"))
-        if pct is None or pct == 0:
-            flat += 1
-        elif pct > 0:
-            up += 1
-        else:
-            down += 1
-
+def collect_market_breadth() -> dict:
+    """仅后台调用。全部分页成功且完整后才发布新结果。"""
+    first_page = _fetch_breadth_page(1)
+    total_stocks = int(first_page.get("total", 0))
+    if not 100 <= total_stocks <= 10000:
+        raise ValueError(f"市场宽度总数异常: {total_stocks}")
+    total_pages = (total_stocks + 99) // 100
+    pages = {"1": first_page}
     if total_pages > 1:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(_fetch_page, pn) for pn in range(2, total_pages + 1)]
-            for f in concurrent.futures.as_completed(futures):
-                diff = f.result()
-                for d in diff:
-                    pct = _to_float(d.get("f3"))
-                    if pct is None or pct == 0:
-                        flat += 1
-                    elif pct > 0:
-                        up += 1
-                    else:
-                        down += 1
-
+        jobs = {str(page): lambda page=page: _fetch_breadth_page(page)
+                for page in range(2, total_pages + 1)}
+        results, errors, _ = collect_stages(jobs, required=jobs, budget=30, executor=_breadth_executor)
+        if errors:
+            raise OSError(f"市场宽度分页失败: {errors}")
+        pages.update(results)
+    up = down = flat = 0
+    seen = set()
+    for page, data in pages.items():
+        rows = data["diff"]
+        expected = min(100, total_stocks - (int(page) - 1) * 100)
+        if data.get("total") != total_stocks or len(rows) != expected:
+            raise ValueError(f"市场宽度第{page}页不完整")
+        for row in rows:
+            identity = (row["f13"], row["f12"])
+            if identity in seen:
+                raise ValueError("市场宽度分页出现重复股票")
+            seen.add(identity)
+            pct = _to_float(row.get("f3"))
+            if pct is None or pct == 0:
+                flat += 1
+            elif pct > 0:
+                up += 1
+            else:
+                down += 1
     total = up + down + flat
-    if total < 100:
-        log.warning(f"市场宽度数据不足: {total}只")
-        return None
-
     breadth_ratio = up / max(up + down, 1) if (up + down) > 0 else 0.5
-    result = {
+    return {
         "up": up,
         "down": down,
         "flat": flat,
         "total": total,
         "breadth_ratio": round(breadth_ratio, 3),
     }
-    log.info(f"市场宽度(全量{total}只): {up}涨/{down}跌/{flat}平, ratio={breadth_ratio:.1%}")
-    _cache_set(cache_key, result)
-    return result
 
 
 def fetch_all_a_shares() -> List[Dict]:
