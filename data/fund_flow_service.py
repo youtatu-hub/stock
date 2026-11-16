@@ -9,7 +9,7 @@ import time
 from data.kline_fetcher import utc_now
 from data.request_runtime import collect_stages, data_stage
 
-FLOW_BUDGET_SECONDS = 3.0
+FLOW_BUDGET_SECONDS = 8.0
 FLOW_REFRESH_SECONDS = 10
 FLOW_RETRY_SECONDS = 30
 FLOW_SNAPSHOT_SECONDS = 300

@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from analysis.volume_price_module import _analyze_fund_flow
 from data import kline_fetcher as fetcher
 from data.fund_flow_service import RealtimeFlowService, history_status
+from data.request_runtime import collect_stages
 
 
 class FundFlowTests(unittest.TestCase):
@@ -23,6 +24,26 @@ class FundFlowTests(unittest.TestCase):
             data = fetcher._get_flow_json("/flow", {}, ["https://old.example", "https://new.example"])
         self.assertTrue(data["data"]["klines"][0].startswith("2000-01-03"))
         self.assertTrue(data["fetched_at"])
+
+    def test_slow_backup_does_not_discard_available_history_at_parent_deadline(self):
+        release = threading.Event()
+
+        def response(url, **kwargs):
+            if "slow.example" in url:
+                release.wait(1)
+                raise OSError("slow backup")
+            return Mock(json=Mock(return_value={"data": {"klines": ["2000-01-03,1,2,3,4,5,6"]}}))
+
+        try:
+            with patch.object(fetcher, "_http_get", side_effect=response):
+                values, errors, _ = collect_stages({
+                    "flow": lambda: fetcher._get_flow_json(
+                        "/flow", {}, ["https://available.example", "https://slow.example"]),
+                }, required=("flow",), budget=0.3)
+                self.assertFalse(errors)
+                self.assertTrue(values["flow"]["data"]["klines"])
+        finally:
+            release.set()
 
     def test_realtime_parser_retains_trading_date_and_fetch_time(self):
         payload = {"fetched_at": "2026-11-16T07:00:01+00:00", "data": {

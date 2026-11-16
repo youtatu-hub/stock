@@ -425,7 +425,7 @@ def handle_fund_flow(params: dict) -> dict:
         return {"error": "缺少symbol参数"}
     values, errors, _ = collect_stages({
         "fund_flow": lambda: {"flows": fetch_fund_flow(symbol, days=30, force=True)},
-    }, required=("fund_flow",), budget=3)
+    }, required=("fund_flow",), budget=8)
     flows = values.get("fund_flow", {}).get("flows") or []
     return {"symbol": symbol, "status": "error" if errors else "ok" if flows else "unavailable",
             "message": errors.get("fund_flow", ""), "flows": serialize_history(flows),
@@ -750,7 +750,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if path == "/api/health":
                     self._json({"status": "ok", "time": time.strftime("%H:%M:%S"),
-                                "flow_api_version": 2})
+                                "flow_api_version": 3})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))
                 elif path == "/api/market_breadth":

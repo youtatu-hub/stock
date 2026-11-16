@@ -1820,9 +1820,9 @@ async function loadHistoricalFlow(symbol) {
   if (!symbol || !session || !session.active) return;
   stopFlowRequests();
   const generation = _flowGeneration;
-  const request = _flowRequestSession = new StockLoadSession(5000);
+  const request = _flowRequestSession = new StockLoadSession(10000);
   document.getElementById('flow-retry').disabled = true;
-  showFlowState('正在获取日级资金流…', '最多等待5秒');
+  showFlowState('正在获取日级资金流…', '最多等待10秒');
   try {
     const data = await request.request(`${API}/api/fund_flow?symbol=${encodeURIComponent(symbol)}`);
     if (!session.active || generation !== _flowGeneration || _flowMode !== 'daily') return;
@@ -1846,10 +1846,10 @@ async function loadRealtimeFlow(symbol, force = false) {
   if (!force && _flowRequestSession) return;
   stopFlowRequests();
   const generation = _flowGeneration;
-  const request = _flowRequestSession = new StockLoadSession(5000);
+  const request = _flowRequestSession = new StockLoadSession(10000);
   document.getElementById('flow-retry').disabled = true;
   if (force || !session.lastRealtimeFlow) {
-    showFlowState('正在获取分时资金流…', '最多等待5秒');
+    showFlowState('正在获取分时资金流…', '最多等待10秒');
     document.getElementById('flow-summary').textContent = '正在刷新';
     document.getElementById('flow-meta').textContent = '';
     document.getElementById('flow-details').textContent = '';

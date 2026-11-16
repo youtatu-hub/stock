@@ -15,6 +15,7 @@ import math
 import os
 import sys
 import time
+import socket
 import logging
 import threading
 import concurrent.futures
@@ -49,6 +50,39 @@ def _quote_timestamp(value) -> str:
         return datetime.fromtimestamp(stamp, timezone.utc).isoformat(timespec="seconds") if stamp > 0 else ""
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
+
+
+# 保留原版可用的东财兼容解析；HTTPS Host/SNI 及证书校验仍使用原域名。
+_PUSH2DELAY_IP = "117.184.45.167"
+_original_getaddrinfo = socket.getaddrinfo
+_dns_redirected = False
+_dns_lock = threading.Lock()
+
+
+def _patch_dns():
+    global _dns_redirected
+    mode = os.environ.get("STOCK_EASTMONEY_DNS_MODE", "legacy").strip().lower()
+    if mode not in ("legacy", "system"):
+        raise ValueError("STOCK_EASTMONEY_DNS_MODE 只能是 legacy 或 system")
+    if mode == "system":
+        return
+    with _dns_lock:
+        if _dns_redirected:
+            return
+
+        def resolve(host, port, family=0, type=0, proto=0, flags=0):
+            use_legacy = os.environ.get(
+                "STOCK_EASTMONEY_DNS_MODE", "legacy"
+            ).strip().lower() == "legacy"
+            if use_legacy and isinstance(host, str) and (
+                    host in ("push2.eastmoney.com", "push2his.eastmoney.com")
+                    or host.endswith(".push2his.eastmoney.com")):
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_PUSH2DELAY_IP, port or 443))]
+            return _original_getaddrinfo(host, port, family, type, proto, flags)
+
+        socket.getaddrinfo = resolve
+        _dns_redirected = True
+
 
 # ---- host池 ----
 QUOTE_HOSTS = [
@@ -87,8 +121,14 @@ _CACHE_TTL = 15
 def _get_session() -> requests.Session:
     session = getattr(_sessions, "session", None)
     if session is None:
-        # 使用部署主机的正常DNS，尊重HTTP(S)_PROXY和NO_PROXY配置。
+        _patch_dns()
         session = requests.Session()
+        # 恢复旧版直连，避免宿主机或系统代理悄悄改变行情请求线路。
+        session.trust_env = False
+        proxy = os.environ.get("STOCK_DATA_PROXY", "").strip()
+        if proxy and urlsplit(proxy).scheme not in ("http", "https"):
+            raise ValueError("STOCK_DATA_PROXY 必须是 http:// 或 https:// 代理地址")
+        session.proxies = {"http": proxy or None, "https": proxy or None}
         session.headers.update({
             "User-Agent": UA_POOL[0],
             "Accept": "*/*",
@@ -110,7 +150,7 @@ def _http_get(url: str, **kwargs):
     started = time.monotonic()
     try:
         response = _get_session().get(
-            url, timeout=Timeout(total=budget, connect=min(0.8, budget), read=budget), **kwargs)
+            url, timeout=Timeout(total=budget, connect=budget, read=budget), **kwargs)
         response.raise_for_status()
         return response
     finally:
@@ -205,8 +245,10 @@ _source_slots = threading.BoundedSemaphore(24)
 
 
 def _get_flow_json(path: str, params: dict, hosts: List[str]) -> dict:
-    """并行读取资金流节点，选择日期最新的有效结果，总等待不超过2.5秒。"""
-    deadline = time.monotonic() + remaining_seconds(2.5)
+    """并行读取资金流节点，在请求预算内选择日期最新的结果。"""
+    budget = remaining_seconds(HTTP_ATTEMPT_SECONDS)
+    # 预留结果解析时间，避免慢节点耗尽父请求预算后丢弃已取得的数据。
+    deadline = time.monotonic() + budget - min(0.25, budget * 0.1)
     futures, candidates, errors = {}, [], []
     today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
 
@@ -243,7 +285,7 @@ def _get_flow_json(path: str, params: dict, hosts: List[str]) -> dict:
                 except (requests.RequestException, OSError, ValueError) as exc:
                     errors.append(f"{urlsplit(futures[future]).hostname}：{_source_error(exc)}")
         except TimeoutError:
-            errors.append("资金流节点查询超过2.5秒预算")
+            errors.append("资金流节点查询超过时间预算")
     finally:
         for future in futures:
             future.cancel()
@@ -737,7 +779,7 @@ def fetch_fund_flow(symbol: str, days: int = 30, force: bool = False) -> List[Fu
 
 
 # ---- 盘中实时分时资金流 ----
-# 交由部署主机正常DNS选路；这些是同一供应商的不同节点。
+# 同一供应商的不同节点；push2 默认使用上方的旧版兼容解析。
 RT_FLOW_HOSTS = [
     "https://push2.eastmoney.com",
     "https://push2delay.eastmoney.com",

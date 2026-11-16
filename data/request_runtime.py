@@ -13,7 +13,7 @@ from contextlib import contextmanager
 log = logging.getLogger("trend_data")
 DATA_BUDGET_SECONDS = 8.0
 OPTIONAL_BUDGET_SECONDS = 3.0
-HTTP_ATTEMPT_SECONDS = 2.0
+HTTP_ATTEMPT_SECONDS = 8.0
 
 request_id = contextvars.ContextVar("request_id", default="background")
 _deadline = contextvars.ContextVar("data_deadline", default=None)

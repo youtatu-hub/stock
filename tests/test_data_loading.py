@@ -3,6 +3,8 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import os
+import socket
 import threading
 import time
 import unittest
@@ -23,6 +25,67 @@ def sample_klines(count=60):
     return [fetcher.Kline(f"2026-{i // 28 + 1:02d}-{i % 28 + 1:02d}", 10 + i / 10,
                          10.1 + i / 10, 10.3 + i / 10, 9.8 + i / 10, 10000 + i * 10)
             for i in range(count)]
+
+
+class TransportRegressionTests(unittest.TestCase):
+    def setUp(self):
+        stack = self.enterContext(ExitStack())
+        stack.enter_context(patch.dict(os.environ, {
+            "STOCK_EASTMONEY_DNS_MODE": "legacy", "STOCK_DATA_PROXY": "",
+            "HTTP_PROXY": "http://ambient.invalid:8080",
+            "HTTPS_PROXY": "http://ambient.invalid:8080",
+        }))
+        self.resolver = Mock(return_value=[("system DNS",)])
+        stack.enter_context(patch.object(socket, "getaddrinfo", self.resolver))
+        stack.enter_context(patch.object(fetcher, "_original_getaddrinfo", self.resolver))
+        stack.enter_context(patch.object(fetcher, "_dns_redirected", False))
+        stack.enter_context(patch.object(fetcher, "_sessions", threading.local()))
+
+    def test_legacy_resolution_is_scoped_and_system_mode_bypasses_it(self):
+        fetcher._patch_dns()
+        for host in ("push2.eastmoney.com", "push2his.eastmoney.com", "82.push2his.eastmoney.com"):
+            with self.subTest(host=host):
+                self.assertEqual(socket.getaddrinfo(host, 443)[0][-1], ("117.184.45.167", 443))
+        self.resolver.assert_not_called()
+        for host in ("qt.gtimg.cn", "localhost", "push2his.eastmoney.com.example.org"):
+            with self.subTest(host=host):
+                self.assertEqual(socket.getaddrinfo(host, 443), [("system DNS",)])
+                self.resolver.assert_called_with(host, 443, 0, 0, 0, 0)
+        with patch.dict(os.environ, {"STOCK_EASTMONEY_DNS_MODE": "system"}):
+            self.assertEqual(socket.getaddrinfo("push2.eastmoney.com", 443), [("system DNS",)])
+
+    def test_only_explicit_market_proxy_changes_direct_default(self):
+        session = fetcher._get_session()
+        self.addCleanup(session.close)
+        settings = session.merge_environment_settings("https://push2.eastmoney.com/", {}, False, None, None)
+        self.assertFalse(session.trust_env)
+        self.assertFalse(settings["proxies"])
+        self.assertTrue(settings["verify"])
+        proxy = "http://market-proxy.example:8080"
+        with patch.dict(os.environ, {"STOCK_DATA_PROXY": proxy}):
+            fetcher._sessions.session = None
+            session = fetcher._get_session()
+            self.addCleanup(session.close)
+            settings = session.merge_environment_settings("https://push2.eastmoney.com/", {}, False, None, None)
+            self.assertEqual(settings["proxies"], {"http": proxy, "https": proxy})
+            self.assertTrue(settings["verify"])
+
+    def test_connection_can_use_eight_seconds_but_respects_parent_deadline(self):
+        session = Mock()
+        with patch.object(fetcher, "_get_session", return_value=session):
+            fetcher._http_get("https://upstream.example/")
+            timeout = session.get.call_args.kwargs["timeout"]
+            self.assertEqual(timeout.total, 8)
+            self.assertEqual(timeout.connect_timeout, 8)
+            with deadline_scope(time.monotonic() + 2):
+                fetcher._http_get("https://upstream.example/")
+                timeout = session.get.call_args.kwargs["timeout"]
+                self.assertGreater(timeout.connect_timeout, 1.5)
+                self.assertLessEqual(timeout.total, 2)
+            session.get.reset_mock()
+            with deadline_scope(time.monotonic() - 1), self.assertRaises(TimeoutError):
+                fetcher._http_get("https://upstream.example/")
+            session.get.assert_not_called()
 
 
 class RuntimeTests(unittest.TestCase):

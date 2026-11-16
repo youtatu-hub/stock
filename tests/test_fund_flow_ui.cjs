@@ -36,7 +36,7 @@ test('切回实时立即清除旧图；失败显示时间和重试，并独立�
   const page = setup();
   page.run("switchFlowMode('realtime')");
   assert.equal(page.chart.option.title.text, '正在获取分时资金流…');
-  assert.equal(page.pending[0].timeout, 5000);
+  assert.equal(page.pending[0].timeout, 10000);
   page.pending[0].resolve({status:'error',message:'连接超时',flows:[],checked_at:'2026-11-16T13:00:00Z',retry_after_seconds:30});
   await new Promise(setImmediate);
   assert.equal(page.nodes.get('flow-retry').disabled, false);
