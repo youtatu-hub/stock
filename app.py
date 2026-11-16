@@ -33,6 +33,7 @@ from data.kline_fetcher import (
     Kline, Quote, FundFlow, MinuteData, MinuteFlow, utc_now
 )
 from data.market_breadth import market_breadth_cache
+from data.fund_flow_service import history_status, serialize_history, realtime_flow_service
 from data.request_runtime import collect_stages, fetch_required, request_id
 from analysis.signal_engine import run_analysis, SignalEngineResult
 from analysis.signal_policy import apply_signal_optimization as _apply_signal_optimization
@@ -221,6 +222,10 @@ def handle_analyze(params: dict) -> dict:
     if quote and quote.stale:
         degraded["quote"] = f"实时报价刷新失败，显示最近成功报价（{quote.fetched_at}）"
     flows = data.get("fund_flow", [])
+    flow_status = history_status(flows, klines, period)
+    if flow_status["lagging"]:
+        degraded["fund_flow"] = (f"日级资金流仅截至{flow_status['data_through']}，"
+                                  f"K线截至{flow_status['reference_date']}")
     index_klines = data.get("index")
     breadth_started = time.monotonic()
     breadth_snapshot = market_breadth_cache.snapshot()
@@ -300,8 +305,8 @@ def handle_analyze(params: dict) -> dict:
         "quote": quote_to_dict(quote) if quote else None,
         "signal": signal_data,
         "klines": [kline_to_dict(k) for k in klines[-120:]],  # 返回最近120条K线
-        "flows": [{"date": f.date, "main_net": f.main_net, "super_large_net": f.super_large_net,
-                    "large_net": f.large_net, "main_pct": f.main_pct} for f in flows] if flows else [],
+        "flows": serialize_history(flows),
+        "flow_status": flow_status,
         "market_env": market_env,  # 大盘环境摘要
         "breadth": breadth,  # 市场宽度（涨跌家数）
         "breadth_status": breadth_snapshot,
@@ -410,27 +415,21 @@ def handle_realtime_flow(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
-    flows = fetch_required("realtime_flow", lambda: {"flows": fetch_realtime_flow(symbol)})["flows"]
-    if not flows:
-        return {"status": "unavailable", "message": "数据源未提供该品种的实时资金流记录，原因未提供",
-                "flows": [], "checked_at": utc_now()}
-    # 最后一根是当日累计总值
-    last = flows[-1]
-    return {
-        "symbol": symbol,
-        "status": "ok",
-        "checked_at": utc_now(),
-        "flows": [{"time": f.time, "main_net": f.main_net, "super_large_net": f.super_large_net,
-                    "large_net": f.large_net, "medium_net": f.medium_net, "small_net": f.small_net} for f in flows],
-        "summary": {
-            "main_net": last.main_net,
-            "super_large_net": last.super_large_net,
-            "large_net": last.large_net,
-            "medium_net": last.medium_net,
-            "small_net": last.small_net,
-        },
-        "time_range": f"{flows[0].time} ~ {flows[-1].time}",
-    }
+    return realtime_flow_service.snapshot(symbol, fetch_realtime_flow,
+                                           force=params.get("refresh", ["0"])[0] == "1")
+
+
+def handle_fund_flow(params: dict) -> dict:
+    symbol = params.get("symbol", [""])[0].strip()
+    if not symbol:
+        return {"error": "缺少symbol参数"}
+    values, errors, _ = collect_stages({
+        "fund_flow": lambda: {"flows": fetch_fund_flow(symbol, days=30, force=True)},
+    }, required=("fund_flow",), budget=3)
+    flows = values.get("fund_flow", {}).get("flows") or []
+    return {"symbol": symbol, "status": "error" if errors else "ok" if flows else "unavailable",
+            "message": errors.get("fund_flow", ""), "flows": serialize_history(flows),
+            "flow_status": history_status(flows), "checked_at": utc_now()}
 
 
 # ---- 扫描功能 ----
@@ -750,7 +749,8 @@ class Handler(BaseHTTPRequestHandler):
             token = request_id.set(uuid.uuid4().hex[:12])
             try:
                 if path == "/api/health":
-                    self._json({"status": "ok", "time": time.strftime("%H:%M:%S")})
+                    self._json({"status": "ok", "time": time.strftime("%H:%M:%S"),
+                                "flow_api_version": 2})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))
                 elif path == "/api/market_breadth":
@@ -769,6 +769,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(handle_chanlun_daily(params))
                 elif path == "/api/realtime_flow":
                     self._json(handle_realtime_flow(params))
+                elif path == "/api/fund_flow":
+                    self._json(handle_fund_flow(params))
                 elif path == "/api/scan":
                     self._json(handle_scan(params))
                 else:

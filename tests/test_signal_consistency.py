@@ -247,11 +247,11 @@ class DataProvenanceTests(unittest.TestCase):
 
     def test_failed_flow_is_distinct_from_empty_successful_response(self):
         with patch.object(fetcher, "_cache_get", return_value=None), \
-                patch.object(fetcher, "_get_json_eastmoney", return_value=None):
+                patch.object(fetcher, "_get_flow_json", return_value=None):
             with self.assertRaises(OSError):
                 fetcher.fetch_realtime_flow("999712")
         with patch.object(fetcher, "_cache_get", return_value=None), \
-                patch.object(fetcher, "_get_json_eastmoney", return_value={"data": {"klines": []}}):
+                patch.object(fetcher, "_get_flow_json", return_value={"data": {"klines": []}}):
             self.assertEqual(fetcher.fetch_realtime_flow("999712"), [])
 
 
@@ -272,7 +272,7 @@ class HttpSmokeTests(unittest.TestCase):
             thread.start()
             try:
                 results = {}
-                for endpoint in ("health", "quote", "kline", "analyze", "chanlun_daily", "realtime_flow"):
+                for endpoint in ("health", "quote", "kline", "analyze", "chanlun_daily", "realtime_flow", "fund_flow"):
                     connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
                     connection.request("GET", f"/api/{endpoint}?symbol=999713")
                     response = connection.getresponse()

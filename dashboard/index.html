@@ -156,12 +156,18 @@ body {
 #minute-vol { width: 100%; height: 90px; flex-shrink: 0; display: none; }
 
 /* 资金流 */
-.flow-section { height: 130px; flex-shrink: 0; border-top: 1px solid #1a1a1a; }
+.flow-section { max-height: 320px; overflow-y: auto; flex-shrink: 0; border-top: 1px solid #1a1a1a; }
 .flow-section .fs-title {
   font-size: 11px; color: #666; padding: 4px 12px;
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 #flow-chart { width: 100%; height: 100px; }
+#flow-meta { padding: 0 12px 4px; color: #999; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+#flow-details { padding: 0 12px 6px; font-size: 11px; color: #aaa; }
+#flow-details table { width: 100%; text-align: right; border-collapse: collapse; }
+#flow-details th, #flow-details td { padding: 3px 8px; border-bottom: 1px solid #222; }
+#flow-details summary { cursor: pointer; }
+.ft-btn:disabled { opacity: 0.5; cursor: wait; }
 .flow-toggle { margin-left: auto; display: flex; gap: 2px; }
 .ft-btn {
   font-size: 10px; padding: 1px 6px; border: 1px solid #333; border-radius: 3px;
@@ -715,9 +721,12 @@ body {
           <span class="flow-toggle">
             <button class="ft-btn ft-active" id="ft-rt" onclick="switchFlowMode('realtime')">今日实时</button>
             <button class="ft-btn" id="ft-daily" onclick="switchFlowMode('daily')">近30日</button>
+            <button class="ft-btn" id="flow-retry" onclick="retryFlow()">重新获取</button>
           </span>
         </div>
+        <div id="flow-meta"></div>
         <div id="flow-chart"></div>
+        <div id="flow-details"></div>
       </div>
       <div class="loading-overlay" id="loading"><div class="spinner"></div></div>
       <div id="signal-tooltip"></div>
@@ -822,6 +831,10 @@ let _minuteYRange = null;    // 固定Y轴范围
 let _dailyChanlun = null;    // 缓存缠论日线分析结果
 let _flowMode = 'realtime';  // 资金流模式：'realtime'=今日实时, 'daily'=近30日
 let _dailyFlows = null;      // 缓存日级资金流数据（analyze返回）
+let _dailyFlowStatus = {};
+let _flowRequestSession = null;
+let _flowTimer = null;
+let _flowGeneration = 0;
 let _signalLines = [];       // K线水平线信息（止损/入场/目标），供鼠标悬浮解释
 let _signalPoints = [];     // K线标记点信息（买卖信号），供鼠标悬浮解释
 let _currentIndicator = 'none';  // 当前技术指标
@@ -1720,116 +1733,181 @@ function renderMinute(data, chanlunData) {
 }
 
 // ===== 资金流 =====
-function renderFlow(flows) {
-  _dailyFlows = flows;  // 缓存日级数据，供模式切换时使用
-  if (_flowMode === 'realtime') {
-    // 实时模式：不渲染日级图表，由loadRealtimeFlow处理
-    loadRealtimeFlow(currentSymbol);
-    return;
-  }
-  _renderDailyFlow(flows);
+function renderFlow(flows, status = {}) {
+  _dailyFlows = flows;
+  _dailyFlowStatus = status;
+  if (_flowMode === 'daily') _renderDailyFlow(flows, status);
 }
 
-function _renderDailyFlow(flows) {
+function renderFlowDetails(flows) {
+  const el = document.getElementById('flow-details');
+  if (!flows || !flows.length) { el.textContent = ''; return; }
+  el.innerHTML = `<details><summary>查看逐日数值（${flows.length}条，单位：万元）</summary>
+    <div style="max-height:140px;overflow:auto"><table><thead><tr><th>日期</th><th>主力净流入</th><th>超大单净流入</th></tr></thead>
+    <tbody>${flows.map(f => `<tr><td>${escHtml(f.date)}</td><td>${(f.main_net / 1e4).toFixed(2)}</td><td>${(f.super_large_net / 1e4).toFixed(2)}</td></tr>`).join('')}</tbody></table></div></details>`;
+}
+
+function showFlowState(title, hint = '') {
+  flowChart.clear();
+  flowChart.setOption({animation: false, title: {text: title, subtext: hint,
+    left: 'center', top: 'center', textStyle: {color: C.textDim, fontSize: 13},
+    subtextStyle: {color: '#999', fontSize: 11}}}, true);
+}
+
+function _renderDailyFlow(flows, status = {}) {
   const fs = document.getElementById('flow-summary');
+  renderFlowDetails(flows);
   if (!flows || !flows.length) {
-    fs.textContent = '';
-    flowChart.setOption({ title: { text: '无资金流数据', left: 'center', top: 'center', textStyle: { color: C.textDim, fontSize: 13 } } }, true);
+    fs.textContent = '日级资金流暂无记录';
+    document.getElementById('flow-meta').textContent = status.message || '数据源未提供记录';
+    showFlowState('日级资金流暂无记录', '可点击重新获取');
     return;
   }
-  // 近5日主力净流入摘要
   const recent = flows.slice(-5);
-  const totalMain = recent.reduce((s, f) => s + f.main_net, 0);
+  const totalMain = recent.reduce((sum, flow) => sum + flow.main_net, 0);
   const totalMainYi = (totalMain / 1e8).toFixed(2);
-  fs.innerHTML = `近5日主力 <span style="color:${totalMain>=0?C.up:C.down};font-weight:bold">${totalMain>=0?'+':''}${totalMainYi}亿</span>`;
-
+  fs.innerHTML = `最近${recent.length}个资金流交易日主力合计 <span style="color:${totalMain >= 0 ? C.up : C.down};font-weight:bold">${totalMain >= 0 ? '+' : ''}${totalMainYi}亿</span>（${escHtml(recent[0].date)}~${escHtml(recent.at(-1).date)}）`;
+  const lastDate = status.data_through || flows.at(-1).date;
+  const reference = status.reference_date || _klineData.at(-1)?.date;
+  const lagging = reference && lastDate < reference;
+  const lagCount = status.lag_trading_days ?? (currentView === 'dayk' ? _klineData.filter(k => k.date > lastDate).length : null);
+  document.getElementById('flow-meta').textContent = `日级数据截至 ${lastDate}；成功获取 ${formatDataTime(status.fetched_at)} · ${status.source || '东方财富'}${lagging ? `；落后于K线截至 ${reference}${lagCount != null ? '，缺少最近' + lagCount + '个交易日' : ''}` : ''}${status.message ? '；' + status.message : ''}`;
   const dates = flows.map(f => f.date);
-  const mainNet = flows.map(f => +(f.main_net / 1e8).toFixed(3));
-  const superLarge = flows.map(f => +(f.super_large_net / 1e8).toFixed(3));
-
+  const mainNet = flows.map(f => +(f.main_net / 1e8).toFixed(4));
+  const superLarge = flows.map(f => +(f.super_large_net / 1e8).toFixed(4));
   flowChart.setOption({
-    backgroundColor: C.bg,
-    animation: false,
-    legend: { data: ['主力净流入', '超大单'], textStyle: { color: C.textDim, fontSize: 10 }, top: 2, itemWidth: 12, itemHeight: 8 },
-    xAxis: { type: 'category', data: dates, axisLabel: { color: C.textDim, fontSize: 9 }, axisLine: { lineStyle: { color: C.axis } } },
-    yAxis: { type: 'value', axisLabel: { color: C.textDim, fontSize: 9 }, splitLine: { lineStyle: { color: C.grid } } },
-    grid: { left: 50, right: 20, top: 22, bottom: 18 },
+    backgroundColor: C.bg, animation: false,
+    legend: {data: ['主力净流入', '超大单'], textStyle: {color: C.textDim, fontSize: 10}, top: 2, itemWidth: 12, itemHeight: 8},
+    xAxis: {type: 'category', data: dates, axisLabel: {color: C.textDim, fontSize: 9}, axisLine: {lineStyle: {color: C.axis}}},
+    yAxis: {type: 'value', axisLabel: {color: C.textDim, fontSize: 9}, splitLine: {lineStyle: {color: C.grid}}},
+    grid: {left: 50, right: 20, top: 22, bottom: 18},
     series: [
-      { name: '主力净流入', type: 'bar', data: mainNet.map(v => ({ value: v, itemStyle: { color: v >= 0 ? C.up + '88' : C.down + '88' } })) },
-      { name: '超大单', type: 'line', data: superLarge, symbol: 'circle', symbolSize: 3, lineStyle: { color: C.ma20, width: 1 } },
+      {name: '主力净流入', type: 'bar', data: mainNet.map(value => ({value, itemStyle: {color: value >= 0 ? C.up + '88' : C.down + '88'}}))},
+      {name: '超大单', type: 'line', data: superLarge, symbol: 'circle', symbolSize: 3, lineStyle: {color: C.ma20, width: 1}},
     ],
-    tooltip: { trigger: 'axis', formatter: p => {
-      let html = `<div style="font-size:11px">${p[0].axisValue}</div>`;
-      for (const x of p) html += `<div><span style="color:${x.color}">●</span> ${x.seriesName}: ${x.value>=0?'+':''}${x.value.toFixed(2)}亿</div>`;
-      return html;
-    }},
+    tooltip: {trigger: 'axis', formatter: items => items.length ? `${escHtml(items[0].axisValue)}<br>` + items.map(item => `${item.seriesName}: ${item.value >= 0 ? '+' : ''}${item.value.toFixed(4)}亿`).join('<br>') : ''},
   }, true);
 }
 
-// ===== 盘中实时资金流 =====
+function stopFlowRequests() {
+  _flowGeneration++;
+  if (_flowTimer) { clearTimeout(_flowTimer); _flowTimer = null; }
+  if (_flowRequestSession) { _flowRequestSession.cancel(); _flowRequestSession = null; }
+  document.getElementById('flow-retry').disabled = false;
+}
+
 function switchFlowMode(mode) {
+  stopFlowRequests();
   _flowMode = mode;
-  // 更新按钮状态
   document.getElementById('ft-rt').classList.toggle('ft-active', mode === 'realtime');
   document.getElementById('ft-daily').classList.toggle('ft-active', mode === 'daily');
+  flowChart.clear();
+  for (const id of ['flow-summary', 'flow-meta', 'flow-details']) document.getElementById(id).textContent = '';
   if (mode === 'realtime') {
-    loadRealtimeFlow(currentSymbol);
+    loadRealtimeFlow(currentSymbol, true);
   } else {
-    _renderDailyFlow(_dailyFlows);
+    _renderDailyFlow(_dailyFlows, _dailyFlowStatus);
   }
 }
 
-async function loadRealtimeFlow(symbol) {
+function retryFlow() {
+  if (_flowMode === 'realtime') loadRealtimeFlow(currentSymbol, true);
+  else loadHistoricalFlow(currentSymbol);
+}
+
+async function loadHistoricalFlow(symbol) {
   const session = _loadSession;
-  if (!symbol || !session || !session.active || session.flowRefreshing) return;
-  session.flowRefreshing = true;
+  if (!symbol || !session || !session.active) return;
+  stopFlowRequests();
+  const generation = _flowGeneration;
+  const request = _flowRequestSession = new StockLoadSession(5000);
+  document.getElementById('flow-retry').disabled = true;
+  showFlowState('正在获取日级资金流…', '最多等待5秒');
   try {
-    const data = await session.request(`${API}/api/realtime_flow?symbol=${encodeURIComponent(symbol)}`);
-    if (session.active && _flowMode === 'realtime') renderRealtimeFlow(data);
-  } catch(e) {
-    if (session.active && _flowMode === 'realtime') {
-      renderRealtimeFlow({error: e.message});
-      console.warn('[realtime_flow]', e);
+    const data = await request.request(`${API}/api/fund_flow?symbol=${encodeURIComponent(symbol)}`);
+    if (!session.active || generation !== _flowGeneration || _flowMode !== 'daily') return;
+    if (data.flows?.length) renderFlow(data.flows, data.flow_status);
+    else _renderDailyFlow(_dailyFlows, {..._dailyFlowStatus, message: data.message || '数据源未提供新记录'});
+  } catch (error) {
+    if (session.active && generation === _flowGeneration && _flowMode === 'daily') {
+      _renderDailyFlow(_dailyFlows, {..._dailyFlowStatus, message: `刷新失败：${error.message}`});
     }
   } finally {
-    session.flowRefreshing = false;
+    if (generation === _flowGeneration) {
+      _flowRequestSession = null;
+      document.getElementById('flow-retry').disabled = false;
+    }
+  }
+}
+
+async function loadRealtimeFlow(symbol, force = false) {
+  const session = _loadSession;
+  if (!symbol || !session || !session.active || _flowMode !== 'realtime') return;
+  if (!force && _flowRequestSession) return;
+  stopFlowRequests();
+  const generation = _flowGeneration;
+  const request = _flowRequestSession = new StockLoadSession(5000);
+  document.getElementById('flow-retry').disabled = true;
+  if (force || !session.lastRealtimeFlow) {
+    showFlowState('正在获取分时资金流…', '最多等待5秒');
+    document.getElementById('flow-summary').textContent = '正在刷新';
+    document.getElementById('flow-meta').textContent = '';
+    document.getElementById('flow-details').textContent = '';
+  }
+  let retrySeconds = 30;
+  let data;
+  try {
+    data = await request.request(`${API}/api/realtime_flow?symbol=${encodeURIComponent(symbol)}${force ? '&refresh=1' : ''}`);
+  } catch (error) {
+    data = {status: 'error', message: error.message, flows: [], checked_at: new Date().toISOString(), retry_after_seconds: 30};
+  } finally {
+    if (session.active && generation === _flowGeneration && _flowMode === 'realtime') {
+      retrySeconds = Math.max(1, data?.retry_after_seconds || 30);
+      if (!data.flows?.length && session.lastRealtimeFlow && Date.now() - Date.parse(session.lastRealtimeFlow.fetched_at) <= 300000) {
+        data = {...session.lastRealtimeFlow, status: 'stale', stale: true, message: data.message,
+          checked_at: data.checked_at, retry_after_seconds: retrySeconds};
+      }
+      if (data.flows?.length && !data.stale) session.lastRealtimeFlow = data;
+      renderRealtimeFlow(data);
+      _flowRequestSession = null;
+      document.getElementById('flow-retry').disabled = false;
+      _flowTimer = setTimeout(() => loadRealtimeFlow(symbol), retrySeconds * 1000);
+    }
   }
 }
 
 function renderRealtimeFlow(data) {
   const fs = document.getElementById('flow-summary');
-  if (data.error || !data.flows || !data.flows.length) {
-    fs.textContent = `${data.error || data.message || '数据源未提供实时资金流记录'}${data.checked_at ? '；检查时间 ' + formatDataTime(data.checked_at) : ''}`;
-    flowChart.setOption({ title: { text: data.error ? '资金流获取失败' : '资金流暂无记录', left: 'center', top: 'center', textStyle: { color: C.textDim, fontSize: 13 } } }, true);
+  document.getElementById('flow-details').textContent = '';
+  const retrySeconds = data.retry_after_seconds || 30;
+  const nextTime = new Date(Date.now() + retrySeconds * 1000).toLocaleTimeString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
+  if (data.error || !data.flows?.length) {
+    fs.textContent = data.status === 'unavailable' ? '分时资金流暂无记录' : '分时资金流获取失败';
+    document.getElementById('flow-meta').textContent = `${data.message || data.error || '数据源未提供记录'}；本次检查 ${formatDataTime(data.checked_at)}；下次自动尝试 ${nextTime}（北京时间）`;
+    showFlowState(fs.textContent, '可点击“重新获取”，或切换“近30日”查看历史数据');
     return;
   }
-
-  const flows = data.flows;
   const summary = data.summary || {};
   const mainNetYi = (summary.main_net / 1e8).toFixed(2);
   const superLargeYi = (summary.super_large_net / 1e8).toFixed(2);
-  fs.innerHTML = `今日主力 <span style="color:${summary.main_net>=0?C.up:C.down};font-weight:bold">${summary.main_net>=0?'+':''}${mainNetYi}亿</span> | 超大单 <span style="color:${summary.super_large_net>=0?C.up:C.down};font-weight:bold">${summary.super_large_net>=0?'+':''}${superLargeYi}亿</span>`;
-
-  const times = flows.map(f => f.time);
+  fs.innerHTML = `${data.stale ? '[旧数据] ' : ''}${escHtml(data.data_date || '数据日期未提供')}主力累计 <span style="color:${summary.main_net >= 0 ? C.up : C.down};font-weight:bold">${summary.main_net >= 0 ? '+' : ''}${mainNetYi}亿</span> | 超大单 <span style="color:${summary.super_large_net >= 0 ? C.up : C.down};font-weight:bold">${summary.super_large_net >= 0 ? '+' : ''}${superLargeYi}亿</span>`;
+  const referenceDate = _klineData.at(-1)?.date;
+  const behind = data.data_date && referenceDate && data.data_date < referenceDate;
+  document.getElementById('flow-meta').textContent = `数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '东方财富'}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}`;
+  const flows = data.flows;
   const mainNet = flows.map(f => +(f.main_net / 1e8).toFixed(4));
   const superLarge = flows.map(f => +(f.super_large_net / 1e8).toFixed(4));
-
   flowChart.setOption({
-    backgroundColor: C.bg,
-    animation: false,
-    legend: { data: ['主力净流入(累计)', '超大单(累计)'], textStyle: { color: C.textDim, fontSize: 10 }, top: 2, itemWidth: 12, itemHeight: 8 },
-    xAxis: { type: 'category', data: times, axisLabel: { color: C.textDim, fontSize: 9, interval: 29 }, axisLine: { lineStyle: { color: C.axis } } },
-    yAxis: { type: 'value', axisLabel: { color: C.textDim, fontSize: 9 }, splitLine: { lineStyle: { color: C.grid } } },
-    grid: { left: 50, right: 20, top: 22, bottom: 18 },
+    backgroundColor: C.bg, animation: false,
+    legend: {data: ['主力净流入(累计)', '超大单(累计)'], textStyle: {color: C.textDim, fontSize: 10}, top: 2, itemWidth: 12, itemHeight: 8},
+    xAxis: {type: 'category', data: flows.map(f => f.time), axisLabel: {color: C.textDim, fontSize: 9, interval: 29}, axisLine: {lineStyle: {color: C.axis}}},
+    yAxis: {type: 'value', axisLabel: {color: C.textDim, fontSize: 9}, splitLine: {lineStyle: {color: C.grid}}},
+    grid: {left: 50, right: 20, top: 22, bottom: 18},
     series: [
-      { name: '主力净流入(累计)', type: 'bar', data: mainNet.map(v => ({ value: v, itemStyle: { color: v >= 0 ? C.up + '88' : C.down + '88' } })) },
-      { name: '超大单(累计)', type: 'line', data: superLarge, symbol: 'none', lineStyle: { color: C.ma20, width: 1 } },
+      {name: '主力净流入(累计)', type: 'bar', data: mainNet.map(value => ({value, itemStyle: {color: value >= 0 ? C.up + '88' : C.down + '88'}}))},
+      {name: '超大单(累计)', type: 'line', data: superLarge, symbol: 'none', lineStyle: {color: C.ma20, width: 1}},
     ],
-    tooltip: { trigger: 'axis', formatter: p => {
-      let html = `<div style="font-size:11px">${p[0].axisValue}</div>`;
-      for (const x of p) html += `<div><span style="color:${x.color}">●</span> ${x.seriesName}: ${x.value>=0?'+':''}${x.value.toFixed(3)}亿</div>`;
-      return html;
-    }},
+    tooltip: {trigger: 'axis', formatter: items => items.length ? `${escHtml(data.data_date || '')} ${escHtml(items[0].axisValue)}<br>` + items.map(item => `${item.seriesName}: ${item.value >= 0 ? '+' : ''}${item.value.toFixed(4)}亿`).join('<br>') : ''},
   }, true);
 }
 
@@ -2362,6 +2440,7 @@ function setStageStatus(stage, label, state, error = false) {
 }
 
 async function analyze(symbol) {
+  stopFlowRequests();
   if (_loadSession) _loadSession.cancel();
   if (_minuteSession) _minuteSession.cancel();
   const session = _loadSession = new StockLoadSession();
@@ -2377,11 +2456,12 @@ async function analyze(symbol) {
   _minuteData = null;
   _minuteChanlun = null;
   _dailyFlows = null;
+  _dailyFlowStatus = {};
   _lastSignalData = null;
   _currentStockName = '';
   _lastQuote = readQuoteSnapshot(symbol);
   for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) chart.clear();
-  for (const id of ['module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid', 'sa-stats', 'sa-detail', 'flow-summary']) {
+  for (const id of ['module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid', 'sa-stats', 'sa-detail', 'flow-summary', 'flow-meta', 'flow-details']) {
     document.getElementById(id).textContent = '';
   }
   for (const id of ['plan-card', 'market-card', 'risk-card', 'chanlun-card']) {
@@ -2435,7 +2515,7 @@ async function analyze(symbol) {
     chartReady = true;
     if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
     updateKlineStatus(data.kline_status);
-    renderFlow(data.flows);
+    renderFlow(data.flows, data.flow_status);
     renderSignal(data.signal);
     renderCanslim(data.signal.canslim);
     renderKeyLevels(data.signal.key_levels);
@@ -2475,7 +2555,7 @@ async function analyze(symbol) {
   }, error => {
     setStageStatus('analysis', '分析', '暂不可用', true);
     document.getElementById('sum-body').textContent = `分析失败：${error.message}`;
-    document.getElementById('flow-summary').textContent = '分析资金流暂不可用';
+    if (_flowMode === 'daily') document.getElementById('flow-summary').textContent = '日级资金流暂不可用，可点击重新获取';
   });
 
   session.run('chanlun', `${API}/api/chanlun_daily?${query}&count=250`, data => {
@@ -2488,6 +2568,7 @@ async function analyze(symbol) {
     document.getElementById('chanlun-daily-body').textContent = `缠论分析失败：${error.message}`;
   });
 
+  if (_flowMode === 'realtime') loadRealtimeFlow(symbol);
   if (currentView === 'minute') loadMinute(symbol);
   _refreshTimer = setInterval(() => refreshQuote(symbol), 2000);
 }
@@ -2506,10 +2587,6 @@ async function refreshQuote(symbol) {
       if (currentView === 'minute') {
         // 分时视图：用轻量刷新，只更新价格数据，不全量重载图表
         refreshMinuteLight(symbol);
-      }
-      // 实时资金流刷新（5秒间隔，后端有5秒缓存）
-      if (_flowMode === 'realtime') {
-        loadRealtimeFlow(symbol);
       }
     }
   } catch(e) {

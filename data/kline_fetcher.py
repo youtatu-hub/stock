@@ -15,13 +15,14 @@ import math
 import os
 import sys
 import time
-import socket
 import logging
 import threading
 import concurrent.futures
+import contextvars
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 # 便携依赖目录：无内置 python/ 时，从发行包 libs/ 加载第三方依赖
 _LIBS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "libs")
@@ -48,30 +49,6 @@ def _quote_timestamp(value) -> str:
         return datetime.fromtimestamp(stamp, timezone.utc).isoformat(timespec="seconds") if stamp > 0 else ""
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
-
-# ---- DNS重定向：push2his/push2 → push2delay IP ----
-# push2his服务器拒绝直连，但push2delay CDN按SNI返回数据
-# 这是东财API的已知行为，参考A股资金流向监控工具的实现
-_PUSH2DELAY_IP = "117.184.45.167"
-_original_getaddrinfo = socket.getaddrinfo
-_dns_redirected = False
-
-
-def _patch_dns():
-    """Monkey-patch socket.getaddrinfo，将push2his/push2重定向到push2delay IP。"""
-    global _dns_redirected, _original_getaddrinfo
-    if _dns_redirected:
-        return
-    _dns_redirected = True
-
-    def _patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-        if host and ("push2his.eastmoney.com" in host or host == "push2.eastmoney.com"):
-            # 直接返回push2delay的IP，SNI保持原host
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_PUSH2DELAY_IP, port or 443))]
-        return _original_getaddrinfo(host, port, family, type, proto, flags)
-
-    socket.getaddrinfo = _patched_getaddrinfo
-    log.debug("DNS重定向已启用: push2his/push2 → push2delay IP")
 
 # ---- host池 ----
 QUOTE_HOSTS = [
@@ -110,10 +87,8 @@ _CACHE_TTL = 15
 def _get_session() -> requests.Session:
     session = getattr(_sessions, "session", None)
     if session is None:
-        _patch_dns()  # 启用DNS重定向
+        # 使用部署主机的正常DNS，尊重HTTP(S)_PROXY和NO_PROXY配置。
         session = requests.Session()
-        session.trust_env = False
-        session.proxies = {"http": None, "https": None}
         session.headers.update({
             "User-Agent": UA_POOL[0],
             "Accept": "*/*",
@@ -175,10 +150,30 @@ def _to_float(v: Any) -> Optional[float]:
         return None
 
 
-def _get_json_eastmoney(path: str, params: dict, host_pool: List[str]) -> Optional[dict]:
+def _source_error(exc: Exception) -> str:
+    if isinstance(exc, (requests.Timeout, TimeoutError)):
+        return "连接或读取超时"
+    if isinstance(exc, requests.HTTPError):
+        return f"HTTP {exc.response.status_code}" if exc.response is not None else "HTTP请求失败"
+    if isinstance(exc, requests.exceptions.ProxyError):
+        return "代理连接失败"
+    if isinstance(exc, requests.exceptions.SSLError):
+        return "TLS连接失败"
+    if isinstance(exc, requests.ConnectionError):
+        text = str(exc)
+        if "NameResolutionError" in text or "Failed to resolve" in text:
+            return "DNS解析失败"
+        if "Connection refused" in text:
+            return "连接被拒绝"
+        return "连接断开或无法建立连接"
+    return "响应格式无效"
+
+
+def _get_json_eastmoney(path: str, params: dict, host_pool: List[str], *, strict=False) -> Optional[dict]:
     """东财API请求，带host池轮换。path如/api/qt/stock/get"""
     current_url = host_pool[0] + path
     empty_response = None
+    errors = []
     for attempt in range(len(host_pool)):
         try:
             r = _http_get(current_url, params=params)
@@ -192,12 +187,69 @@ def _get_json_eastmoney(path: str, params: dict, host_pool: List[str]) -> Option
                         log.debug(f"host返回空klines，尝试下一个: {current_url}")
                     else:
                         return data
-        except (requests.RequestException, ValueError) as e:
+                else:
+                    errors.append(f"{urlsplit(current_url).hostname}：未返回数据")
+        except (requests.RequestException, ValueError, TimeoutError) as e:
+            errors.append(f"{urlsplit(current_url).hostname}：{_source_error(e)}")
             log.warning(f"请求失败 try={attempt+1} {current_url}: {e}")
         _rotate_ua()
         current_url = host_pool[(attempt + 1) % len(host_pool)] + path
     log.warning("数据源均未返回有效结果: %s", path)
+    if strict and empty_response is None:
+        raise OSError("；".join(errors) or "数据源未返回有效响应")
     return empty_response
+
+
+_source_executor = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="flow-source")
+_source_slots = threading.BoundedSemaphore(24)
+
+
+def _get_flow_json(path: str, params: dict, hosts: List[str]) -> dict:
+    """并行读取资金流节点，选择日期最新的有效结果，总等待不超过2.5秒。"""
+    deadline = time.monotonic() + remaining_seconds(2.5)
+    futures, candidates, errors = {}, [], []
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+
+    def fetch(host):
+        with deadline_scope(deadline):
+            response = _http_get(host + path, params=params).json()
+        if not isinstance(response, dict) or not isinstance(response.get("data"), dict):
+            raise ValueError("未返回资金流数据")
+        response["fetched_at"] = utc_now()
+        return response
+
+    try:
+        for host in hosts:
+            if not _source_slots.acquire(blocking=False):
+                errors.append(f"{urlsplit(host).hostname}：请求队列已满")
+                continue
+            context = contextvars.copy_context()
+            try:
+                future = _source_executor.submit(context.run, fetch, host)
+            except Exception:
+                _source_slots.release()
+                raise
+            future.add_done_callback(lambda _: _source_slots.release())
+            futures[future] = host
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=max(0, deadline - time.monotonic())):
+                try:
+                    response = future.result()
+                    rows = response["data"].get("klines") or []
+                    latest = max((row.split(",", 1)[0] for row in rows), default="")
+                    candidates.append((latest, response))
+                    if latest[:10] >= today:
+                        return response
+                except (requests.RequestException, OSError, ValueError) as exc:
+                    errors.append(f"{urlsplit(futures[future]).hostname}：{_source_error(exc)}")
+        except TimeoutError:
+            errors.append("资金流节点查询超过2.5秒预算")
+    finally:
+        for future in futures:
+            future.cancel()
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    raise OSError("；".join(errors) or "资金流数据源不可用")
 
 
 def _is_etf(symbol: str) -> bool:
@@ -637,14 +689,15 @@ class FundFlow:
     medium_net: float
     small_net: float
     main_pct: float = 0.0
+    fetched_at: str = ""
 
 
 @data_stage
-def fetch_fund_flow(symbol: str, days: int = 30) -> List[FundFlow]:
+def fetch_fund_flow(symbol: str, days: int = 30, force: bool = False) -> List[FundFlow]:
     """历史资金流。东财fflow/daykline。"""
     cache_key = f"flow_{symbol}_{days}"
     cached = _cached(cache_key)
-    if cached:
+    if cached and not force:
         return cached
 
     secid = symbol_to_secid(symbol)
@@ -657,7 +710,9 @@ def fetch_fund_flow(symbol: str, days: int = 30) -> List[FundFlow]:
         "ut": "fa5fd1943c7b386f172d6893dbfba10b",
     }
 
-    data = _get_json_eastmoney("/api/qt/stock/fflow/daykline/get", params, HIS_HOSTS)
+    data = _get_flow_json("/api/qt/stock/fflow/daykline/get", params, [
+        "https://push2his.eastmoney.com", "https://82.push2his.eastmoney.com",
+        "https://push2test.eastmoney.com"])
     if data and data.get("data") and data["data"].get("klines"):
         flows: List[FundFlow] = []
         for line in data["data"]["klines"]:
@@ -671,21 +726,22 @@ def fetch_fund_flow(symbol: str, days: int = 30) -> List[FundFlow]:
                     large_net=float(parts[4]),
                     super_large_net=float(parts[5]),
                     main_pct=float(parts[6]) if parts[6] else 0.0,
+                    fetched_at=data.get("fetched_at", ""),
                 )
                 flows.append(f)
-        if len(flows) >= 3:
+        flows.sort(key=lambda flow: flow.date)
+        if flows:
             _set_cache(cache_key, flows)
             return flows
     return []
 
 
 # ---- 盘中实时分时资金流 ----
-# push2delay直连即可，不需要DNS重定向（push2test的fflow/kline返回0条数据）
+# 交由部署主机正常DNS选路；这些是同一供应商的不同节点。
 RT_FLOW_HOSTS = [
-    "https://push2delay.eastmoney.com",
     "https://push2.eastmoney.com",
+    "https://push2delay.eastmoney.com",
     "https://82.push2.eastmoney.com",
-    "https://90.push2.eastmoney.com",
 ]
 
 # 实时数据缓存，2秒——保证秒级刷新拿到最新数据
@@ -701,6 +757,8 @@ class MinuteFlow:
     medium_net: float       # 累计中单净流入(元)
     large_net: float        # 累计大单净流入(元)
     super_large_net: float  # 累计超大单净流入(元)
+    date: str = ""
+    fetched_at: str = ""
 
 
 @data_stage
@@ -725,7 +783,7 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
         "lmt": "300",
     }
 
-    data = _get_json_eastmoney("/api/qt/stock/fflow/kline/get", params, RT_FLOW_HOSTS)
+    data = _get_flow_json("/api/qt/stock/fflow/kline/get", params, RT_FLOW_HOSTS)
     if not data or data.get("data") is None:
         raise OSError("实时资金流数据源请求失败或未返回有效响应")
     if not data["data"].get("klines"):
@@ -744,7 +802,13 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
                 medium_net=_to_float(parts[3]) or 0.0,
                 large_net=_to_float(parts[4]) or 0.0,
                 super_large_net=_to_float(parts[5]) or 0.0,
+                date=parts[0].split(" ", 1)[0] if " " in parts[0] else "",
+                fetched_at=data.get("fetched_at", ""),
             ))
+    flows.sort(key=lambda flow: (flow.date, flow.time))
+    if flows and flows[-1].date:
+        latest_date = flows[-1].date
+        flows = [flow for flow in flows if flow.date == latest_date]
     _cache_set(cache_key, flows)
     return flows
 
@@ -1013,8 +1077,14 @@ def _fetch_breadth_page(page: int) -> dict:
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
         "pz": "100",
         "pn": str(page),
+        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
     }
-    response = _get_json_eastmoney("/api/qt/clist/get", base_params, QUOTE_HOSTS)
+    try:
+        response = _get_json_eastmoney("/api/qt/clist/get", base_params, [
+            "https://push2.eastmoney.com", "https://82.push2.eastmoney.com",
+            "https://push2delay.eastmoney.com"], strict=True)
+    except OSError as exc:
+        raise OSError(f"市场宽度第{page}页获取失败：{exc}") from exc
     data = response.get("data") if response else None
     if not data or not data.get("diff"):
         raise OSError(f"市场宽度第{page}页获取失败")

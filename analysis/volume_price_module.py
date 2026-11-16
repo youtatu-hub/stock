@@ -100,31 +100,35 @@ def _analyze_fund_flow(flows: Optional[List[FundFlow]]) -> Tuple[str, int]:
       否则按昨日均量基准对比单日净额：
         前两日均值 prev_avg = (main_net[-3] + main_net[-2]) / 2：
           若 prev_avg >= 0，阈值 thr = 0.5*prev_avg：
-            last < -thr → 今日主力大幅流出(-10)
-            last >  thr → 今日主力大幅流入(+10)
+            last < -thr → 最新数据日单日主力大幅流出(-10)
+            last >  thr → 最新数据日单日主力大幅流入(+10)
           若 prev_avg < 0 → 温合(0)。
     """
     if not flows:
         return "", 0
-    recent = flows[-3:]
+    recent = sorted(flows, key=lambda flow: flow.date)[-3:]
+    last_date = recent[-1].date
     main_nets = [f.main_net for f in recent if f.main_net is not None]
     if not main_nets:
         return "", 0
 
     if all(v > 0 for v in main_nets):
-        return "连续3日主力净流入", 15
+        return f"最近{len(main_nets)}个资金流交易日主力净流入（截至{last_date}）", 15
     if all(v < 0 for v in main_nets):
-        return "连续3日主力净流出", -15
+        return f"最近{len(main_nets)}个资金流交易日主力净流出（截至{last_date}）", -15
+
+    if len(main_nets) < 3:
+        return f"{last_date}单日主力净流入{main_nets[-1] / 1e8:+.2f}亿", 0
 
     last_net = main_nets[-1]
     prev_avg = (main_nets[0] + main_nets[1]) / 2
     if prev_avg >= 0:
         threshold = 0.5 * prev_avg
         if last_net < -threshold:
-            return "今日主力大幅流出", -10
+            return f"{last_date}单日主力大幅流出（净额{last_net / 1e8:+.2f}亿）", -10
         if last_net > threshold:
-            return "今日主力大幅流入", 10
-    return "主力资金温和", 0
+            return f"{last_date}单日主力大幅流入（净额{last_net / 1e8:+.2f}亿）", 10
+    return f"{last_date}单日主力资金温和", 0
 
 
 def _detect_limit_up_volume(klines: List[Kline]) -> Optional[str]:
