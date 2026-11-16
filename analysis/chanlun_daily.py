@@ -1,15 +1,18 @@
 """缠论日线/周线分析（明文版）。
 
 管线：合并K线 → 分型 → 笔 → 中枢 → MACD背驰 → 买卖点信号。
-所有算法与阈值均从加密版(analysis/chanlun_daily.py)黑盒反推，
-并已通过 8 只基准股（600519/000001/600036/300750/601318/000858/600900/002594）
-的 A/B 回归验证。
+基础结构沿用原有算法；最近60根K线重算，收盘价统一判定中枢位置，
+买卖点按日期和有效期筛选。
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+
+ANALYSIS_WINDOW = 60
+SIGNAL_MAX_AGE_BARS = 10
+SIGNAL_MAX_DEVIATION = 0.10
 
 
 @dataclass
@@ -54,6 +57,10 @@ class Zhongshu:
     stroke_end_idx: int = 0
     is_broken: bool = False
     break_direction: str = ""
+    historical_break_direction: str = ""
+    historical_break_date: str = ""
+    break_stroke_idx: int = -1
+    current_position: str = "inside"
 
 
 @dataclass
@@ -63,6 +70,11 @@ class ChanlunDailySignal:
     date: str
     description: str
     confidence: int = 50
+    expired: bool = False
+    expiry_reason: str = ""
+    age_bars: int = 0
+    deviation_pct: Optional[float] = 0.0
+    invalidation_price: Optional[float] = None
 
 
 @dataclass
@@ -86,6 +98,8 @@ class ChanlunDailyResult:
     chart_fractals: List[dict]
     chart_zhongshus: List[dict]
     chart_strokes: List[dict]
+    current_price: Optional[float] = None
+    as_of: str = ""
 
 
 def calc_daily_macd(closes: List[float]) -> Tuple[List[float], List[float], List[float]]:
@@ -224,7 +238,8 @@ def find_daily_strokes(fractals: List[DailyFractal],
     return strokes
 
 
-def find_zhongshus(strokes: List[DailyStroke]) -> List[Zhongshu]:
+def find_zhongshus(strokes: List[DailyStroke], dates: List[str],
+                   closes: List[float]) -> List[Zhongshu]:
     """构建中枢：相邻两笔的重叠区间，成对推进，落空时单步推进。"""
     zhongshus: List[Zhongshu] = []
     n = len(strokes)
@@ -243,20 +258,30 @@ def find_zhongshus(strokes: List[DailyStroke]) -> List[Zhongshu]:
         else:
             i += 1
 
-    # 确定每个中枢是否被后续笔突破及方向；突破时 end_date 取突破笔的起始日期
+    # 历史突破供三类点识别；当前状态只看同一份K线的最新收盘价。
     for z in zhongshus:
-        for s in strokes[z.stroke_end_idx + 1:]:
-            if s.direction == "up" and s.end_price > z.zg:
-                z.is_broken = True
-                z.break_direction = "up"
-                z.end_date = s.start_date
+        for date, close in zip(dates, closes):
+            if date <= z.end_date:
+                continue
+            position = _close_position(close, z)
+            if position != "inside":
+                z.historical_break_direction = position
+                z.historical_break_date = date
+                z.break_stroke_idx = next((i for i, s in enumerate(strokes)
+                                          if i > z.stroke_end_idx and s.start_date <= date <= s.end_date), -1)
                 break
-            if s.direction == "down" and s.end_price < z.zd:
-                z.is_broken = True
-                z.break_direction = "down"
-                z.end_date = s.start_date
-                break
+        z.current_position = _close_position(closes[-1], z) if closes else "inside"
+        z.is_broken = z.current_position != "inside"
+        z.break_direction = z.current_position if z.is_broken else ""
     return zhongshus
+
+
+def _close_position(close: float, zhongshu: Zhongshu) -> str:
+    if close > zhongshu.zg:
+        return "up"
+    if close < zhongshu.zd:
+        return "down"
+    return "inside"
 
 
 def detect_daily_divergence(strokes: List[DailyStroke],
@@ -319,7 +344,7 @@ def generate_daily_signals(strokes: List[DailyStroke],
                            zhongshus: List[Zhongshu]) -> List[ChanlunDailySignal]:
     """生成买卖点信号。
 
-    顺序：[一类点按日期交错] + [二类买] + [二类卖] + [三类卖] + [三类买]。
+    所有类型统一按日期排序。
     一类点置信度为背驰置信度；二类点固定 70；三类点固定 75。
     """
     type1: List[ChanlunDailySignal] = []
@@ -365,30 +390,59 @@ def generate_daily_signals(strokes: List[DailyStroke],
     buy2_list.sort(key=lambda s: s.date)
     sell2_list.sort(key=lambda s: s.date)
 
-    # ---- 三类买卖点：中枢突破后的回抽笔（即中枢末笔 +2 的笔） ----
+    # 三类买卖点使用实际突破笔之后的回抽笔。
     for z in zhongshus:
-        if not z.is_broken:
+        if not z.historical_break_direction or z.break_stroke_idx < 0:
             continue
-        recess_idx = z.stroke_end_idx + 2
+        recess_idx = z.break_stroke_idx + 1
         if recess_idx >= len(strokes):
             continue
         retro = strokes[recess_idx]
-        if z.break_direction == "up":  # 向上突破 -> 三类买点（回踩笔为向下笔）
+        if z.historical_break_direction == "up":  # 向上突破 -> 三类买点（回踩笔为向下笔）
             if retro.direction == "down" and retro.end_price > z.zg:
                 buy3_list.append(ChanlunDailySignal(
                     type="buy3", price=retro.end_price, date=retro.end_date,
                     confidence=75,
+                    invalidation_price=z.zg,
                     description="三类买点：中枢[{0:.2f}-{1:.2f}]向上突破后回踩，未回到中枢内".format(z.zd, z.zg)))
         else:  # 向下突破 -> 三类卖点（反弹笔为向上笔）
             if retro.direction == "up" and retro.end_price < z.zd:
                 sell3_list.append(ChanlunDailySignal(
                     type="sell3", price=retro.end_price, date=retro.end_date,
                     confidence=75,
+                    invalidation_price=z.zd,
                     description="三类卖点：中枢[{0:.2f}-{1:.2f}]向下突破后反弹，未回到中枢内".format(z.zd, z.zg)))
     sell3_list.sort(key=lambda s: s.date)
     buy3_list.sort(key=lambda s: s.date)
 
-    return type1 + buy2_list + sell2_list + sell3_list + buy3_list
+    return sorted(type1 + buy2_list + sell2_list + sell3_list + buy3_list,
+                  key=lambda signal: (signal.date, signal.type))
+
+
+def mark_signal_validity(signals: List[ChanlunDailySignal], dates: List[str],
+                         closes: List[float], max_age_bars: int = SIGNAL_MAX_AGE_BARS,
+                         max_deviation: float = SIGNAL_MAX_DEVIATION) -> None:
+    """信号有效期按交易K线计数，当前价与信号价偏差以信号价为分母。"""
+    date_indices = {date: i for i, date in enumerate(dates)}
+    for signal in signals:
+        index = date_indices.get(signal.date)
+        reasons = []
+        signal.age_bars = len(dates) - 1 - index if index is not None else len(dates)
+        deviation = abs(closes[-1] - signal.price) / signal.price if closes and signal.price > 0 else math.inf
+        signal.deviation_pct = round(deviation * 100, 2) if math.isfinite(deviation) else None
+        if index is None or signal.age_bars > max_age_bars:
+            reasons.append(f"距最新K线{signal.age_bars}根，超过{max_age_bars}根有效期")
+        if deviation > max_deviation and not math.isclose(deviation, max_deviation, abs_tol=1e-9):
+            reasons.append(f"价格偏离超过{max_deviation:.0%}")
+        if signal.invalidation_price is not None and index is not None:
+            subsequent = closes[index + 1:]
+            invalidated = (any(close <= signal.invalidation_price for close in subsequent)
+                           if signal.type.startswith("buy") else
+                           any(close >= signal.invalidation_price for close in subsequent))
+            if invalidated:
+                reasons.append("信号后收盘价已回到或穿过中枢边界")
+        signal.expired = bool(reasons)
+        signal.expiry_reason = "；".join(reasons)
 
 
 def get_signal_type_name(sig_type: str) -> str:
@@ -404,28 +458,32 @@ def _describe_state(strokes: List[DailyStroke],
                     fractal_count: int) -> Tuple[str, str, str]:
     """生成 current_state / summary / description 三段文本。"""
     last_stroke = strokes[-1] if strokes else None
-    is_up = bool(last_stroke and last_stroke.direction == "up")
-    direction_cn = "向上" if is_up else "向下"
-    bull_cn = "多头" if is_up else "空头"
 
     if zhongshus:
         last_z = zhongshus[-1]
         if last_z.is_broken:
-            zs_text = "已向上突破" if last_z.break_direction == "up" else "已向下突破"
+            zs_text = "最新收盘价在上沿之上（向上突破）" if last_z.break_direction == "up" else "最新收盘价在下沿之下（向下突破）"
         else:
-            zs_text = "[{0:.2f}-{1:.2f}]震荡中".format(last_z.zd, last_z.zg)
+            zs_text = "最新收盘价处于[{0:.3f}-{1:.3f}]内".format(last_z.zd, last_z.zg)
     else:
         zs_text = "无中枢"
 
-    latest = signals[-1] if signals else None
-    state = "处于{0}笔中，{1}延续，最近中枢{2}".format(direction_cn, bull_cn, zs_text)
+    latest = max((signal for signal in signals if not signal.expired),
+                 key=lambda signal: (signal.date, signal.type), default=None)
+    if last_stroke:
+        direction_cn = "向上" if last_stroke.direction == "up" else "向下"
+        state = f"最近完成笔{direction_cn}（截至{last_stroke.end_date}），最近中枢{zs_text}"
+        if zhongshus and zhongshus[-1].is_broken and last_stroke.direction != zhongshus[-1].break_direction:
+            state += "；笔方向与当前中枢位置不同，需结合后续笔确认"
+    else:
+        state = f"尚无完成笔，最近中枢{zs_text}"
     if latest:
         type_cn = get_signal_type_name(latest.type)
-        state += "，最新信号：{0}@{1:.2f}".format(type_cn, latest.price)
-        summary = "最新信号：{0}@{1:.2f}({2})".format(type_cn, latest.price, latest.date)
+        state += "；最新有效信号：{0}@{1:.3f}".format(type_cn, latest.price)
+        summary = "最新有效信号：{0}@{1:.3f}({2})".format(type_cn, latest.price, latest.date)
     else:
-        state += "，无信号"
-        summary = "无信号"
+        state += "；暂无有效信号"
+        summary = "暂无有效信号" + (f"（{len(signals)}个历史信号已过期）" if signals else "")
 
     description = "共{0}个分型、{1}笔、{2}个中枢、{3}个信号。{4}".format(
         fractal_count, len(strokes), len(zhongshus), len(signals), state)
@@ -470,6 +528,8 @@ def _build_chart_overlay(fractals: List[DailyFractal],
 
     chart_signals = []
     for s in signals:
+        if s.expired:
+            continue
         style = SIGNAL_STYLE.get(s.type, SIGNAL_STYLE["buy1"])
         type_cn = get_signal_type_name(s.type)
         chart_signals.append({
@@ -493,13 +553,16 @@ def analyze_chanlun_daily(dates: List[str], opens: List[float], closes: List[flo
                           highs: List[float], lows: List[float],
                           volumes: List[float]) -> ChanlunDailyResult:
     """日线缠论完整分析管线。"""
+    dates, opens, closes, highs, lows, volumes = (
+        values[-ANALYSIS_WINDOW:] for values in (dates, opens, closes, highs, lows, volumes))
     merged = merge_daily_klines(dates, highs, lows)
     fractals = find_daily_fractals(merged)
     strokes = find_daily_strokes(fractals, merged)
-    zhongshus = find_zhongshus(strokes)
+    zhongshus = find_zhongshus(strokes, dates, closes)
     dif, dea, bar = calc_daily_macd(closes)
     detect_daily_divergence(strokes, bar, dates)
     signals = generate_daily_signals(strokes, fractals, zhongshus)
+    mark_signal_validity(signals, dates, closes)
     state, summary, description = _describe_state(strokes, zhongshus, signals, len(fractals))
     cs, cf, cz, cst = _build_chart_overlay(fractals, strokes, zhongshus, signals, dates)
     return ChanlunDailyResult(
@@ -508,12 +571,27 @@ def analyze_chanlun_daily(dates: List[str], opens: List[float], closes: List[flo
         fractals=fractals, strokes=strokes, zhongshus=zhongshus, signals=signals,
         macd_dif=dif, macd_dea=dea, macd_bar=bar,
         current_state=state, summary=summary, description=description,
-        chart_signals=cs, chart_fractals=cf, chart_zhongshus=cz, chart_strokes=cst)
+        chart_signals=cs, chart_fractals=cf, chart_zhongshus=cz, chart_strokes=cst,
+        current_price=closes[-1] if closes else None, as_of=dates[-1] if dates else "")
 
 
 def daily_result_to_dict(result: ChanlunDailyResult) -> dict:
     """把结果对象转为字典（供 A/B 对比与图表序列化）。"""
+    def signal_to_dict(signal):
+        return {"type": signal.type, "type_name": get_signal_type_name(signal.type),
+                "price": round(signal.price, 3), "date": signal.date,
+                "confidence": signal.confidence, "description": signal.description,
+                "expired": signal.expired, "expiry_reason": signal.expiry_reason,
+                "age_bars": signal.age_bars, "deviation_pct": signal.deviation_pct}
+
+    signals = sorted(result.signals, key=lambda signal: (signal.date, signal.type), reverse=True)
+    active_signals = [signal_to_dict(signal) for signal in signals if not signal.expired]
     return {
+        "current_price": result.current_price,
+        "as_of": result.as_of,
+        "analysis_window": ANALYSIS_WINDOW,
+        "signal_max_age_bars": SIGNAL_MAX_AGE_BARS,
+        "signal_max_deviation_pct": SIGNAL_MAX_DEVIATION * 100,
         "kline_count": result.kline_count,
         "merged_count": result.merged_count,
         "fractal_count": result.fractal_count,
@@ -529,14 +607,15 @@ def daily_result_to_dict(result: ChanlunDailyResult) -> dict:
                      "macd_area": round(s.macd_area, 2),
                      "has_divergence": s.has_divergence} for s in result.strokes],
         "zhongshus": [{"start_date": z.start_date, "end_date": z.end_date,
-                       "zg": round(z.zg, 2), "zd": round(z.zd, 2),
-                       "zz": round(z.zz, 2),
-                       "is_broken": z.is_broken, "break_direction": z.break_direction}
+                       "zg": z.zg, "zd": z.zd, "zz": z.zz,
+                       "is_broken": z.is_broken, "break_direction": z.break_direction,
+                       "current_position": z.current_position,
+                       "historical_break_direction": z.historical_break_direction,
+                       "historical_break_date": z.historical_break_date}
                       for z in result.zhongshus],
-        "signals": [{"type": s.type, "type_name": get_signal_type_name(s.type),
-                     "price": round(s.price, 2), "date": s.date,
-                     "confidence": s.confidence, "description": s.description}
-                    for s in result.signals],
+        "signals": active_signals,
+        "latest_signal": active_signals[0] if active_signals else None,
+        "expired_signals": [signal_to_dict(signal) for signal in signals if signal.expired],
         "current_state": result.current_state,
         "summary": result.summary,
         "description": result.description,

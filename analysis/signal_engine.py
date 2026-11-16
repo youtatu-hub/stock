@@ -70,22 +70,18 @@ def _volume_price_to_score(vp: VolumePriceResult) -> int:
 
 
 def _breakout_to_score(breakouts: List[BreakoutResult]) -> int:
-    """突破模块评分。有突破信号 60 起，存在空头平仓（偏多）加 3 至 63（加密反推）。"""
-    score = 50
-    has_signal = False
-    has_short_cover = False
+    """多头持仓偏多，空头持仓偏空；不同系统分歧时取平均。"""
+    scores = []
     for b in breakouts:
-        if b.signal in ("持仓", "持仓空头", "多头止损"):
-            has_signal = True
-        if b.signal == "空头平仓":
-            has_short_cover = True
-    if has_signal:
-        score = 60
-    elif has_short_cover:
-        score = 60
-    if has_short_cover:
-        score += 3
-    return min(100, score)
+        if b.signal == "持仓空头" or (b.signal == "持仓" and b.direction == "short"):
+            scores.append(40)
+        elif b.signal == "持仓":
+            scores.append(60)
+        elif b.signal == "空头平仓":
+            scores.append(63)
+        elif b.signal in ("卖出", "多头止损"):
+            scores.append(40)
+    return round(sum(scores) / len(scores)) if scores else 50
 
 
 def _calc_risk_level(
@@ -146,8 +142,8 @@ def _build_trade_plan(
     - 持仓周期：恒为中线(1-3月)
     - notes：仅第一个「持仓」系统的突破信息（用 entry_price 原值）
     """
-    entry = klines[-1].close if klines else 0.0
-    stop = round(entry * 0.95, 2)  # 固定 5% 止损（8/8 验证），先舍入再算盈亏比
+    entry = round(klines[-1].close, 3) if klines else 0.0
+    stop = round(entry * 0.95, 3)
 
     # 目标价：头肩底 > 双底 > 箱体，取首个 > entry 的 target
     priority_map = {"头肩底": 0, "双底": 1, "箱体": 2}
@@ -164,6 +160,7 @@ def _build_trade_plan(
     if target is None:
         target = entry * 1.10
 
+    target = round(target, 3)
     risk_amt = entry - stop
     reward_amt = target - entry
     risk_reward = round(reward_amt / risk_amt, 1) if risk_amt > 0 else 0.0
@@ -181,8 +178,9 @@ def _build_trade_plan(
     # notes：仅第一个「持仓」系统的突破信息，用 entry_price 原值（600519 显示 1362.0）
     notes = []
     for b in breakouts:
-        if b.signal == "持仓" and b.entry_price:
-            note = f"{b.system}：持仓中(突破价{b.entry_price})，止损{b.stop_loss:.2f}"
+        if b.signal in ("持仓", "持仓空头") and b.entry_price:
+            side = "做空" if b.direction == "short" else "做多"
+            note = f"{b.system}模型：{side}(突破价{b.entry_price})，{side}止损{b.stop_loss:.3f}"
             if b.next_add_price:
                 note += f"；加仓价{b.next_add_price:.2f}"
             notes.append(note)
@@ -190,9 +188,9 @@ def _build_trade_plan(
 
     return {
         "action": action,
-        "entry_price": round(entry, 2),
-        "stop_loss": round(stop, 2),
-        "target_price": round(target, 2),
+        "entry_price": entry,
+        "stop_loss": stop,
+        "target_price": target,
         "position_size": position_size,
         "holding_period": holding_period,
         "risk_reward_ratio": risk_reward,
@@ -342,12 +340,13 @@ def run_analysis(
             buy_signals.append(sig)
 
     for b in breakouts:
-        if b.signal == "持仓" and b.entry_price:
-            buy_signals.append(f"{b.system}持仓(N={b.current_n:.2f}，止损{b.stop_loss:.2f})")
+        if b.signal == "持仓空头" or (b.signal == "持仓" and b.direction == "short"):
+            sell_signals.append(f"{b.system}做空模型持仓(N={b.current_n:.3f}，做空止损{b.stop_loss:.3f})")
+        elif b.signal == "持仓" and b.entry_price:
+            buy_signals.append(f"{b.system}做多模型持仓(N={b.current_n:.3f}，做多止损{b.stop_loss:.3f})")
         elif b.signal == "空头平仓":
-            # 加密版反推：用 breakout_price 而非 exit_price（300750 验证 438.24）
-            buy_signals.append(f"{b.system}空头平仓@{b.breakout_price}(偏多)")
-        elif b.signal == "多头止损":
+            buy_signals.append(f"{b.system}空头平仓@{b.exit_price}(偏多)")
+        elif b.signal in ("卖出", "多头止损"):
             sell_signals.append(f"{b.system}多头止损@{b.stop_loss:.2f}")
 
     for sig in canslim.signals:
@@ -384,7 +383,8 @@ def run_analysis(
             key_levels[f"{primary_pattern.name}_{label}"] = round(val, 2)
     for b in breakouts:
         if b.stop_loss > 0:
-            key_levels[f"{b.system}_止损"] = b.stop_loss
+            side = "做空" if b.direction == "short" else "做多"
+            key_levels[f"{b.system}_{side}止损"] = b.stop_loss
     if canslim.cup_handle:
         key_levels["杯柄买点"] = canslim.cup_handle["buy_point"]
     if trend.trendline:

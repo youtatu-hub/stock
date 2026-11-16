@@ -19,6 +19,7 @@ import logging
 import threading
 import concurrent.futures
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # 便携依赖目录：无内置 python/ 时，从发行包 libs/ 加载第三方依赖
@@ -34,6 +35,18 @@ from data.request_runtime import (
 )
 
 log = logging.getLogger("trend_data")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _quote_timestamp(value) -> str:
+    try:
+        stamp = float(value)
+        return datetime.fromtimestamp(stamp, timezone.utc).isoformat(timespec="seconds") if stamp > 0 else ""
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
 
 # ---- DNS重定向：push2his/push2 → push2delay IP ----
 # push2his服务器拒绝直连，但push2delay CDN按SNI返回数据
@@ -160,6 +173,7 @@ def _to_float(v: Any) -> Optional[float]:
 def _get_json_eastmoney(path: str, params: dict, host_pool: List[str]) -> Optional[dict]:
     """东财API请求，带host池轮换。path如/api/qt/stock/get"""
     current_url = host_pool[0] + path
+    empty_response = None
     for attempt in range(len(host_pool)):
         try:
             r = _http_get(current_url, params=params)
@@ -169,6 +183,7 @@ def _get_json_eastmoney(path: str, params: dict, host_pool: List[str]) -> Option
                     # 检查klines是否为空列表（push2delay对kline接口返回空klines）
                     d = data["data"]
                     if isinstance(d, dict) and "klines" in d and not d["klines"]:
+                        empty_response = data
                         log.debug(f"host返回空klines，尝试下一个: {current_url}")
                     else:
                         return data
@@ -177,7 +192,7 @@ def _get_json_eastmoney(path: str, params: dict, host_pool: List[str]) -> Option
         _rotate_ua()
         current_url = host_pool[(attempt + 1) % len(host_pool)] + path
     log.warning("数据源均未返回有效结果: %s", path)
-    return None
+    return empty_response
 
 
 def _is_etf(symbol: str) -> bool:
@@ -225,6 +240,7 @@ class Kline:
     amount: float = 0.0  # 成交额(元)
     pct: float = 0.0  # 涨跌幅(%)
     turnover: float = 0.0  # 换手率(%)
+    fetched_at: str = ""
 
 
 def fetch_kline(symbol: str, count: int = 250, period: str = "day", adjust: str = "qfq",
@@ -282,7 +298,8 @@ def _fetch_price_klines(symbol: str, count: int, period: str, adjust: str) -> Li
         log.warning(f"异常K线数据被过滤 {symbol} {k.date}: O={k.open} H={k.high} L={k.low} C={k.close}")
     if len(valid_klines) < len(klines):
         log.warning(f"过滤{len(klines)-len(valid_klines)}条异常K线 {symbol}")
-    klines = valid_klines
+    fetched_at = utc_now()
+    klines = [replace(kline, fetched_at=fetched_at) for kline in valid_klines]
 
     _set_cache(cache_key, klines)
     return klines
@@ -507,6 +524,9 @@ class Quote:
     amount: float  # 成交额(元)
     turnover: float  # 换手率(%)
     timestamp: str = ""
+    fetched_at: str = ""
+    source: str = "东方财富"
+    volume_unit: str = "手"
 
 
 @data_stage
@@ -520,7 +540,7 @@ def fetch_quote(symbol: str) -> Optional[Quote]:
     secid = symbol_to_secid(symbol)
     params = {
         "secid": secid,
-        "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170,f168",
+        "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170,f168,f86,f124",
         "fltt": "2",
         "invt": "2",
         "ut": "fa5fd1943c7b386f172d6893dbfba10b",
@@ -542,6 +562,8 @@ def fetch_quote(symbol: str) -> Optional[Quote]:
             volume=_to_float(d.get("f47")) or 0,
             amount=_to_float(d.get("f48")) or 0,
             turnover=_to_float(d.get("f168")) or 0,
+            timestamp=_quote_timestamp(d.get("f86")) or _quote_timestamp(d.get("f124")),
+            fetched_at=utc_now(),
         )
         _cache_set(cache_key, q)
         return q
@@ -629,7 +651,7 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
     """盘中实时分时资金流。东财fflow/kline/get，走push2delay，klt=1(1分钟)。
 
     返回当日所有1分钟K线的累计资金流，最后一根即为当日总净流入。
-    非交易日或盘前返回空列表。
+    数据源未提供记录时返回空列表；请求失败单独报错。
     """
     cache_key = f"rt_flow_{symbol}"
     cached = _cache_get(cache_key, _RT_CACHE_TTL)
@@ -647,7 +669,9 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
     }
 
     data = _get_json_eastmoney("/api/qt/stock/fflow/kline/get", params, RT_FLOW_HOSTS)
-    if not data or not data.get("data") or not data["data"].get("klines"):
+    if not data or data.get("data") is None:
+        raise OSError("实时资金流数据源请求失败或未返回有效响应")
+    if not data["data"].get("klines"):
         _cache_set(cache_key, [])
         return []
 

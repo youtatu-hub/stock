@@ -51,12 +51,13 @@ body {
 /* 行情显示 */
 .quote-bar {
   display: flex; align-items: center; gap: 16px; margin-left: auto;
-  white-space: nowrap;
+  white-space: nowrap; flex-wrap: wrap; row-gap: 2px;
 }
 .qb-name { font-size: 15px; font-weight: bold; color: #fff; }
 .qb-price { font-size: 24px; font-weight: bold; }
 .qb-pct { font-size: 16px; font-weight: bold; }
 .qb-meta { font-size: 12px; color: #888; }
+.qb-timing { flex-basis: 100%; font-size: 11px; color: #888; white-space: normal; }
 
 /* 涨跌色 */
 .up { color: #ff2d2d; }
@@ -1030,38 +1031,25 @@ function renderKline(klines, signal = {}) {
         });
         _signalPoints.push({
           date: dates[idx], price: markerY,
-          title: '卖出信号（海龟法则·做空）',
-          formula: `跌破${b.system || '20日'}最低点 ${b.breakout_price || b.channel_low}\n→ 入场 ${b.entry_price}，止损 ${b.stop_loss}（入场+2×N）`,
-          desc: `唐奇安通道：股价跌破过去N天最低点时触发做空信号。\nN值=${b.current_n || '?'}（ATR，反映日均波动幅度）。\n做空止损价=入场价+2×N，涨到止损或触及反向通道平仓。`,
+          title: '卖出信号（海龟法则·多头退出）',
+          formula: `多头退出价 ${b.exit_price || b.stop_loss}\n→ 原突破价 ${b.entry_price}，模型止损 ${b.stop_loss}`,
+          desc: `多头模型触发退出条件。止损以最后加仓价减2N计算，当前N=${b.current_n || '?'}。`,
         });
       }
     }
   }
 
   // 关键水平线（止损、目标价、支撑/压力）——加粗+背景色突出显示
-  // 先判断整体方向：空头持仓时止损在入场价上方
-  let isBearish = false;
-  if (signal.breakouts) {
-    for (const b of signal.breakouts) {
-      if (b.entry_price && b.stop_loss && b.stop_loss > b.entry_price) {
-        isBearish = true; break;
-      }
-    }
-  }
-  if (!isBearish && signal.action) {
-    const a = String(signal.action);
-    if (a.includes('卖') || a.includes('空') || a.includes('跌')) isBearish = true;
-    else if (a.includes('买') || a.includes('涨')) isBearish = false;
-  }
-
   const markLines = [];
   _signalLines = [];
   if (signal.breakouts) {
     for (const b of signal.breakouts) {
+      const isBearish = b.direction === 'short';
+      const side = isBearish ? '做空模型' : '做多模型';
       if (b.stop_loss && b.stop_loss > 0) {
         const slLabel = isBearish
-          ? `止损 ${b.stop_loss.toFixed(2)}\n涨到这里就止损`
-          : `止损 ${b.stop_loss.toFixed(2)}\n跌到这里就卖`;
+          ? `${side}止损 ${b.stop_loss.toFixed(3)}\n涨到这里就止损`
+          : `${side}止损 ${b.stop_loss.toFixed(3)}\n跌到这里就卖`;
         markLines.push({ yAxis: b.stop_loss, lineStyle: { color: C.down, type: 'dashed', width: 2 },
           label: { formatter: slLabel, color: '#fff', fontSize: 11, fontWeight: 'bold',
             backgroundColor: C.down, padding: [3,6], borderRadius: 3, position: 'insideStartTop' } });
@@ -1070,17 +1058,17 @@ function renderKline(klines, signal = {}) {
           value: b.stop_loss,
           title: isBearish ? '止损价（做空）' : '止损价（做多）',
           formula: isBearish
-            ? `${b.entry_price} + 2 × ${nVal} = ${b.stop_loss}`
-            : `${b.entry_price} - 2 × ${nVal} = ${b.stop_loss}`,
+            ? `${b.stop_reference_price || b.entry_price} + 2 × ${nVal} = ${b.stop_loss}`
+            : `${b.stop_reference_price || b.entry_price} - 2 × ${nVal} = ${b.stop_loss}`,
           desc: isBearish
             ? `海龟法则2N止损。N=${nVal}（ATR平均真实波幅，反映股票日均波动幅度）。\n做空止损在入场价上方：如果股价反弹到这里，说明判断错了，认亏平仓。`
-            : `海龟法则2N止损。N=${nVal}（ATR平均真实波幅，反映股票日均波动幅度）。\n做多止损在入场价下方：如果股价跌到这里，说明判断错了，认亏卖出。`,
+            : `海龟法则2N止损。N=${nVal}（ATR平均真实波幅，反映股票日均波动幅度）。\n做多止损以最后加仓价减2N计算；加仓后可能高于最初突破价。跌到止损位时模型退出。`,
         });
       }
       // 持仓也要显示入场价，方便知道成本位置
       if (b.entry_price && b.entry_price > 0 && b.signal !== '观望') {
         const entryColor = isBearish ? C.down : C.up;
-        const entryText = isBearish ? `做空 ${b.entry_price.toFixed(2)}` : `入场 ${b.entry_price.toFixed(2)}`;
+        const entryText = `${side}突破 ${b.entry_price.toFixed(3)}`;
         markLines.push({ yAxis: b.entry_price, lineStyle: { color: entryColor, type: 'solid', width: 2 },
           label: { formatter: entryText, color: '#fff', fontSize: 11, fontWeight: 'bold',
             backgroundColor: entryColor, padding: [3,6], borderRadius: 3, position: 'insideStartTop' } });
@@ -1088,8 +1076,8 @@ function renderKline(klines, signal = {}) {
           value: b.entry_price,
           title: isBearish ? '做空入场价（海龟法则）' : '做多入场价（海龟法则）',
           formula: isBearish
-            ? `股价跌破${b.system || '20日'}最低点 → 做空入场 ${b.entry_price}\n当时通道下轨=${b.channel_low}，上轨=${b.channel_high}`
-            : `股价突破${b.system || '20日'}最高点 → 做多入场 ${b.entry_price}\n当时通道上轨=${b.channel_high}，下轨=${b.channel_low}`,
+            ? `股价跌破${b.system || '20日'}最低点 → 做空入场 ${b.entry_price}\n当前通道下轨=${b.channel_low}，上轨=${b.channel_high}`
+            : `股价突破${b.system || '20日'}最高点 → 做多入场 ${b.entry_price}\n当前通道上轨=${b.channel_high}，下轨=${b.channel_low}`,
           desc: isBearish
             ? `唐奇安通道做空：当股价跌破过去N天的最低点时，触发做空信号。\n入场价=突破时的通道下轨。N值=${b.current_n || '?'}。\n已持有对应天数，止损价在上方。`
             : `唐奇安通道做多：当股价突破过去N天的最高点时，触发做多信号。\n入场价=突破时的通道上轨。N值=${b.current_n || '?'}。\n已持有对应天数，止损价在下方。`,
@@ -1098,8 +1086,9 @@ function renderKline(klines, signal = {}) {
     }
   }
   // 形态目标价
-  if (signal.patterns) {
+  if (signal.patterns && signal.trade_plan?.executable !== false) {
     for (const p of signal.patterns) {
+      const isBearish = p.direction === '看跌';
       if (p.target_price && p.target_price > 0) {
         const targetLabel = isBearish
           ? `目标 ${p.target_price.toFixed(2)}\n跌到这里就止盈`
@@ -1422,115 +1411,50 @@ function renderChanlun(data) {
 function renderChanlunDaily(data) {
   const card = document.getElementById('chanlun-daily-card');
   const el = document.getElementById('chanlun-daily-body');
-  if (!data || data.error) {
-    card.style.display = 'none';
-    return;
-  }
+  if (!data || data.error) { card.style.display = 'none'; return; }
   card.style.display = 'block';
-
   const signals = data.signals || [];
+  const expired = data.expired_signals || [];
   const zhongshus = data.zhongshus || [];
-  const stateText = data.current_state || '';
-  const currentPrice = data.current_price || (_klineData.length ? _klineData[_klineData.length - 1].close : null);
-
-  let html = '';
-
-  // 白话总结（小白模式显示）
-  let plainSummary = '';
+  const lastZs = zhongshus.at(-1);
   const zsLabel = currentView === 'week' ? '缠论周线' : '缠论日线';
-  if (signals.length > 0) {
-    const lastSig = signals[0];
-    plainSummary = `${zsLabel}：${lastSig.type_name}信号，${lastSig.description}`;
-  } else {
-    plainSummary = `${zsLabel}：暂无买卖信号，等待背驰/中枢突破`;
-  }
-  if (currentPrice != null && zhongshus && zhongshus.length > 0) {
-    const lastZs = zhongshus[zhongshus.length - 1];
-    const zd = parseFloat(lastZs.zd), zg = parseFloat(lastZs.zg);
-    if (!isNaN(zd) && !isNaN(zg)) {
-      if (currentPrice >= zd && currentPrice <= zg) {
-        plainSummary += `；当前在中枢[${zd}-${zg}]内震荡`;
-      } else if (currentPrice > zg) {
-        plainSummary += `；已突破中枢上沿${zg}`;
-      } else {
-        plainSummary += `；已跌破中枢下沿${zd}`;
-      }
-    }
-  }
-  html += `<div class="cl-plain-summary"><b>白话总结：</b>${plainSummary}</div>`;
-
-  if (stateText) {
-    html += `<div class="cl-state" style="border-left-color:#7F77DD">${stateText}</div>`;
-  }
-
-  // 信号列表
-  if (signals.length > 0) {
+  let html = `<div class="cl-plain-summary"><b>白话总结：</b>${zsLabel}：${escHtml(data.summary || '暂无有效信号')}</div>`;
+  html += `<div class="cl-state" style="border-left-color:#7F77DD">${escHtml(data.current_state || '')}</div>`;
+  html += `<div style="font-size:11px;color:#888;margin:6px 0">分析截至 ${escHtml(data.as_of || '未知')}；最近 ${data.kline_count} 根K线；收盘字段口径（盘中K线尚未收盘）</div>`;
+  if (signals.length) {
     html += '<div class="cl-signals">';
     for (const sig of signals) {
-      const isBuy = sig.type.startsWith('buy');
-      const cls = isBuy ? 'cl-signal-buy' : 'cl-signal-sell';
-      const tagCls = sig.type;
+      const cls = sig.type.startsWith('buy') ? 'cl-signal-buy' : 'cl-signal-sell';
       html += `<div class="cl-signal-item ${cls}">
-        <span class="cl-signal-tag ${tagCls}">${sig.type_name}</span>
-        <span class="cl-signal-desc">${sig.description}</span>
-        <span class="cl-signal-time">${sig.date}</span>
+        <span class="cl-signal-tag ${sig.type}">${escHtml(sig.type_name)} @${sig.price.toFixed(3)}</span>
+        <span class="cl-signal-desc">${escHtml(sig.description)}</span>
+        <span class="cl-signal-time">${escHtml(sig.date)} · 距今${sig.age_bars}根K线</span>
       </div>`;
     }
     html += '</div>';
-  } else {
-    html += '<div style="color:#555;font-size:12px;padding:6px 0">暂无买卖信号，等待背驰/中枢突破</div>';
   }
-
-  // 当前价格与所处中枢判断
-  let currentZs = null;
-  if (currentPrice != null && zhongshus.length > 0) {
-    for (const zs of zhongshus) {
-      const zd = parseFloat(zs.zd);
-      const zg = parseFloat(zs.zg);
-      if (!isNaN(zd) && !isNaN(zg) && currentPrice >= zd && currentPrice <= zg) {
-        currentZs = zs; break;
-      }
+  html += `<div style="font-size:11px;color:#888">有效期：不超过 ${data.signal_max_age_bars} 根K线，价格偏离不超过 ${data.signal_max_deviation_pct}%</div>`;
+  if (expired.length) {
+    html += `<details style="font-size:11px;color:#888;margin-top:6px"><summary>已过期历史信号（${expired.length}）</summary>`;
+    for (const sig of expired) {
+      html += `<div style="padding:4px 0">[已过期] ${escHtml(sig.type_name)} @${sig.price.toFixed(3)}（${escHtml(sig.date)}）：${escHtml(sig.expiry_reason)}</div>`;
     }
+    html += '</details>';
   }
-
-  // 中枢信息
-  if (zhongshus.length > 0) {
-    html += '<div style="margin-top:6px;font-size:11px;color:#666;border-top:1px solid #0d0d0d;padding-top:4px">中枢列表</div>';
-    if (currentZs) {
-      html += `<div style="margin:4px 0;padding:5px 8px;background:#1a1200;border:1px solid #ff980044;border-radius:4px;font-size:11px;color:#ff9800">
-        当前价格 <b>${currentPrice.toFixed(2)}</b> 处于中枢 <b>[${currentZs.zd} - ${currentZs.zg}]</b> 内，区间上沿压力 ${currentZs.zg}，下沿支撑 ${currentZs.zd}
-      </div>`;
-    } else if (currentPrice != null) {
-      const lastZs = zhongshus[zhongshus.length - 1];
-      const zd = parseFloat(lastZs.zd), zg = parseFloat(lastZs.zg);
-      const pos = currentPrice > zg ? `上沿 ${zg} 之上` : `下沿 ${zd} 之下`;
-      const hint = currentPrice > zg ? '已向上突破，关注回踩能否站稳' : '已跌破中枢，关注是否形成第三类卖点';
-      html += `<div style="margin:4px 0;padding:5px 8px;background:#0d1a0d;border:1px solid #00b35c44;border-radius:4px;font-size:11px;color:#aaa">
-        当前价格 <b>${currentPrice.toFixed(2)}</b> 位于最新中枢 [${lastZs.zd} - ${lastZs.zg}] ${pos}，${hint}
-      </div>`;
-    }
+  if (lastZs && data.current_price != null) {
+    const pos = lastZs.current_position;
+    const positionText = pos === 'up' ? '在上沿之上（向上突破）' : pos === 'down' ? '在下沿之下（向下突破）' : '在中枢内';
+    html += `<div style="margin:6px 0;padding:6px 8px;border:1px solid #7f77dd55;border-radius:4px;font-size:12px;color:#aaa">
+      最新K线收盘价 <b>${data.current_price.toFixed(3)}</b> ${positionText}；最近中枢 <b>[${lastZs.zd.toFixed(3)} - ${lastZs.zg.toFixed(3)}]</b>
+    </div>`;
     for (const zs of zhongshus.slice(-4)) {
-      const isCurrent = currentZs && currentZs === zs;
-      const brokenCls = zs.is_broken ? 'cl-zhongshu-broken' : '';
-      const currentCls = isCurrent ? 'cl-zhongshu-current' : '';
-      const dirText = zs.is_broken ? (zs.break_direction === 'up' ? '向上突破' : '向下突破') : '震荡中';
-      const currentTag = isCurrent ? '<span style="color:#ff9800;font-weight:bold;margin-right:4px">[当前]</span>' : '';
-      html += `<div class="cl-zhongshu ${brokenCls} ${currentCls}">
-        ${currentTag}[${zs.zd} - ${zs.zg}] ${zs.start_date}~${zs.end_date} ${dirText}
+      const dir = zs.current_position === 'up' ? '收盘在上沿之上' : zs.current_position === 'down' ? '收盘在下沿之下' : '收盘在中枢内';
+      html += `<div class="cl-zhongshu ${zs.is_broken ? 'cl-zhongshu-broken' : ''}">
+        ${zs === lastZs ? '[最近] ' : '[历史中枢] '}[${zs.zd.toFixed(3)} - ${zs.zg.toFixed(3)}] ${escHtml(zs.start_date)}~${escHtml(zs.end_date)} ${dir}
       </div>`;
     }
   }
-
-  // 统计
-  html += `<div class="cl-stats">
-    <span>${currentView === 'week' ? '周K' : '日K'}: <b style="color:#ddd">${data.kline_count}</b></span>
-    <span>合并: <b style="color:#ddd">${data.merged_count}</b></span>
-    <span>分型: <b style="color:#ddd">${data.fractal_count}</b></span>
-    <span>笔: <b style="color:#ddd">${data.stroke_count}</b></span>
-    <span>中枢: <b style="color:#ddd">${data.zhongshu_count}</b></span>
-    <span>信号: <b style="color:#ddd">${signals.length}</b></span>
-  </div>`;
-
+  html += `<div class="cl-stats"><span>分型: ${data.fractal_count}</span><span>笔: ${data.stroke_count}</span><span>中枢: ${data.zhongshu_count}</span><span>有效信号: ${signals.length}</span></div>`;
   el.innerHTML = html;
 }
 
@@ -1864,7 +1788,7 @@ async function loadRealtimeFlow(symbol) {
     if (session.active && _flowMode === 'realtime') renderRealtimeFlow(data);
   } catch(e) {
     if (session.active && _flowMode === 'realtime') {
-      document.getElementById('flow-summary').textContent = e.message;
+      renderRealtimeFlow({error: e.message});
       console.warn('[realtime_flow]', e);
     }
   } finally {
@@ -1875,8 +1799,8 @@ async function loadRealtimeFlow(symbol) {
 function renderRealtimeFlow(data) {
   const fs = document.getElementById('flow-summary');
   if (data.error || !data.flows || !data.flows.length) {
-    fs.textContent = data.error || '暂无实时资金流数据';
-    flowChart.setOption({ title: { text: '盘前/非交易日', left: 'center', top: 'center', textStyle: { color: C.textDim, fontSize: 13 } } }, true);
+    fs.textContent = `${data.error || data.message || '数据源未提供实时资金流记录'}${data.checked_at ? '；检查时间 ' + formatDataTime(data.checked_at) : ''}`;
+    flowChart.setOption({ title: { text: data.error ? '资金流获取失败' : '资金流暂无记录', left: 'center', top: 'center', textStyle: { color: C.textDim, fontSize: 13 } } }, true);
     return;
   }
 
@@ -1932,22 +1856,14 @@ function renderSummary(signal) {
   let summary = signal.plain_summary || '';
 
   // 优化信号信息
-  const origAction = signal.original_action || '';
   const vetoReason = signal.veto_reason || '';
-  const riskNotes = signal.risk_notes || [];
+  const riskNotes = (signal.risk_notes || []).filter(note => !summary.includes(note));
   const posAdvice = signal.position_advice || '';
   const riskReward = signal.risk_reward || 0;
 
-  // 如果信号被优化降级，显示对比标签
+  // 只显示最终决策及原因，原始候选评级不作为另一个建议展示。
   let optimizeHtml = '';
-  if (origAction && origAction !== action) {
-    optimizeHtml = `<div style="margin-top:4px;font-size:11px;color:#888">
-      <span style="text-decoration:line-through;color:#666">${origAction}</span>
-      <span style="margin:0 2px">→</span>
-      <span style="color:${isCautious ? '#ffb74d' : '#ffc107'};font-weight:500">${action}</span>
-      ${vetoReason ? `<span style="margin-left:6px;color:#ff6b6b">⚠ ${vetoReason}</span>` : ''}
-    </div>`;
-  } else if (vetoReason) {
+  if (vetoReason && !summary.includes(vetoReason)) {
     optimizeHtml = `<div style="margin-top:4px;font-size:11px;color:#ff6b6b">⚠ ${vetoReason}</div>`;
   }
 
@@ -1999,7 +1915,7 @@ function renderTradePlan(signal) {
   const isBuy = action.includes('买入') && action !== '谨慎买入';
   const isCautious = action === '谨慎买入';
   const isSell = action.includes('卖出');
-  const isWatch = action === '观望';
+  const isWatch = action === '观望' || plan.executable === false && !isSell;
 
   const entry = plan.entry_price || 0;
   const stop = plan.stop_loss || 0;
@@ -2020,8 +1936,8 @@ function renderTradePlan(signal) {
       ${vetoHtml}
       <div style="padding:8px 0;font-size:13px;color:#aaa;line-height:1.6">
         <div style="margin-bottom:6px"><span style="color:#ffc107">当前建议：</span>${pos || signal.position_advice || '空仓等待'}</div>
-        <div style="margin-bottom:6px"><span style="color:#888">适合周期：</span>${period}</div>
-        <div class="plan-notes">${notes}</div>
+        ${period ? `<div style="margin-bottom:6px"><span style="color:#888">适合周期：</span>${period}</div>` : ''}
+        ${notes && notes !== vetoReason ? `<div class="plan-notes">${notes}</div>` : ''}
       </div>`;
     return;
   }
@@ -2113,6 +2029,15 @@ function renderSignal(signal) {
     if (s.type === 'buy') return `<div class="sig-item sig-buy">▲ ${s.text}${coreTag}</div>`;
     else return `<div class="sig-item sig-sell">▼ ${s.text}${coreTag}</div>`;
   }).join('') || '<div style="color:#555;font-size:12px;padding:8px">暂无信号</div>';
+  for (const breakout of signal.breakouts || []) {
+    if (!breakout.entry_price || breakout.direction === 'none') continue;
+    const side = breakout.direction === 'short' ? '做空' : '做多';
+    sl.innerHTML += `<div style="padding:6px 8px;font-size:11px;color:#aaa;border-top:1px solid #222">
+      ${escHtml(breakout.system)} · ${side}模型 · ${escHtml(breakout.signal)}<br>
+      突破参考价 ${breakout.entry_price.toFixed(3)} / ${side}止损 ${breakout.stop_loss.toFixed(3)}<br>
+      ${side === '做空' ? '做空止损在突破价上方；这里只展示模型方向，不代表已持仓。' : '做多止损以最后加仓价减2N计算，加仓后可高于最初突破价。'}
+    </div>`;
+  }
 
   // 风险
   const rc = document.getElementById('risk-card');
@@ -2233,12 +2158,13 @@ function renderMarket(signal, breadth, status = {}) {
       </div>
     </div>`;
   }
-  const updatedAt = status.updated_at ? new Date(status.updated_at).toLocaleString('zh-CN', { hour12: false }) : '';
+  const updatedAt = status.updated_at ? formatDataTime(status.updated_at) : '';
   const freshness = updatedAt
     ? `宽度更新时间：${updatedAt}${status.stale ? '（旧数据）' : ''}${status.last_error ? '，最近刷新失败' : ''}`
-    : '市场宽度尚未就绪，后台正在刷新';
+    : (status.refreshing ? '市场宽度暂无成功快照，正在刷新' :
+       status.last_error ? '市场宽度刷新失败，暂无成功快照' : '市场宽度暂无成功快照');
   breadthHtml += `<div style="margin-top:6px;color:${status.stale ? '#ffc107' : '#888'}">${escHtml(freshness)}</div>`;
-  if (status.last_error) breadthHtml += '<div style="color:#888">保留上一次完整结果，后台将继续重试</div>';
+  if (status.last_error) breadthHtml += `<div style="color:#888">${escHtml(status.last_error)}；${status.available ? '保留上一次完整结果' : '本次未使用市场宽度修正'}${status.refreshing ? '，正在重试' : '，等待下一次刷新'}</div>`;
 
   // 大盘环境卡片：显示M评分+影响+建议（使用真实涨跌家数）
   let advice = '';
@@ -2268,21 +2194,55 @@ function renderMarket(signal, breadth, status = {}) {
     ${mSignalText ? `<div style="color:#888;font-size:11px">${mSignalText}</div>` : ''}
     ${breadthHtml}
     ${advice}
+    <div style="color:#888;margin-top:6px">${escHtml(signal.market_policy || '')}</div>
   `;
 }
 
 // ===== 行情显示 =====
-function updateQuote(q) {
+let _lastQuote = null;
+
+function formatDataTime(value) {
+  if (!value) return '未知';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '未知' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+}
+
+function knownStockName(symbol) {
+  const known = getWatchlist().find(stock => stock.code === symbol && stock.name !== symbol)
+    || FOCUS_GROUPS.flatMap(group => group.stocks).find(stock => stock.code === symbol)
+    || getHistory().find(stock => stock.code === symbol && stock.name !== symbol);
+  return known ? known.name : symbol;
+}
+
+function updateQuote(q, stale = false) {
   const el = document.getElementById('quote-bar');
   if (!q) { el.innerHTML = '<span class="qb-name flat">无行情</span>'; return; }
+  _lastQuote = q;
+  _currentStockName = q.name || knownStockName(q.symbol || currentSymbol);
   const cls = q.pct > 0 ? 'up' : q.pct < 0 ? 'down' : 'flat';
   const sign = q.pct > 0 ? '+' : '';
+  const turnoverTip = `${q.turnover_source || '数据源提供的换手率'}。换手率可以超过100%，需结合品种交易机制和流通份额核实。`;
   el.innerHTML = `
-    <span class="qb-name">${q.name}</span>
+    <span class="qb-name">${escHtml(_currentStockName)}</span>
     <span class="qb-price ${cls}">${q.price.toFixed(3)}</span>
     <span class="qb-pct ${cls}">${sign}${q.pct.toFixed(2)}%</span>
-    <span class="qb-meta">量${fmtVol(q.volume)} 换手${q.turnover.toFixed(1)}%</span>
+    <span class="qb-meta" title="${escHtml(turnoverTip)}">量${fmtVol(q.volume)}${escHtml(q.volume_unit || '手')} 换手${q.turnover.toFixed(1)}%（源值）</span>
+    <span class="qb-timing" style="color:${stale ? '#ffc107' : '#888'}">${stale ? '旧数据 · ' : ''}报价时间 ${formatDataTime(q.timestamp)}；最后成功获取 ${formatDataTime(q.fetched_at)}（北京时间） · ${escHtml(q.source || '数据源未知')}</span>
   `;
+}
+
+function markQuoteFailure(error) {
+  if (_lastQuote) {
+    updateQuote(_lastQuote, true);
+    setStageStatus('quote', '报价', `刷新失败，旧数据；最后成功获取 ${formatDataTime(_lastQuote.fetched_at)}`, true);
+  } else {
+    document.getElementById('quote-bar').textContent = `${knownStockName(currentSymbol)}（${currentSymbol}）报价暂不可用，尚无成功报价`;
+    setStageStatus('quote', '报价', error.message || '获取失败', true);
+  }
+}
+
+function updateKlineStatus(status = {}) {
+  setStageStatus('kline', 'K 线', `截至 ${status.last_bar || '未知'}；获取 ${formatDataTime(status.fetched_at)}`);
 }
 
 function fmtVol(v) {
@@ -2374,6 +2334,7 @@ async function analyze(symbol) {
   _dailyFlows = null;
   _lastSignalData = null;
   _currentStockName = '';
+  _lastQuote = null;
   for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) chart.clear();
   for (const id of ['module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid', 'sa-stats', 'sa-detail', 'flow-summary']) {
     document.getElementById(id).textContent = '';
@@ -2381,7 +2342,7 @@ async function analyze(symbol) {
   for (const id of ['plan-card', 'market-card', 'risk-card', 'chanlun-card']) {
     document.getElementById(id).style.display = 'none';
   }
-  document.getElementById('quote-bar').textContent = `${symbol} 报价加载中…`;
+  document.getElementById('quote-bar').textContent = `${knownStockName(symbol)}（${symbol}）报价加载中…`;
   document.getElementById('sum-body').textContent = '分析加载中…';
   document.getElementById('chanlun-daily-body').textContent = '缠论加载中…';
   document.getElementById('chanlun-daily-card').style.display = currentView === 'minute' ? 'none' : 'block';
@@ -2403,8 +2364,7 @@ async function analyze(symbol) {
     updateQuote(q);
     setStageStatus('quote', '报价', '已更新');
   }, error => {
-    setStageStatus('quote', '报价', error.message, true);
-    if (!session.quoteReady) document.getElementById('quote-bar').textContent = `${symbol} 报价暂不可用`;
+    markQuoteFailure(error);
   }).finally(() => { session.quoteRefreshing = false; });
 
   session.run('kline', `${API}/api/kline?${query}&count=250&basic=1`, data => {
@@ -2412,7 +2372,7 @@ async function analyze(symbol) {
     renderKline(analysisData ? analysisData.klines : data.klines.slice(-120), analysisData ? analysisData.signal : {});
     chartReady = true;
     if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
-    setStageStatus('kline', 'K 线', '已更新');
+    updateKlineStatus(analysisData ? analysisData.kline_status : data.kline_status);
   }, error => {
     if (!chartReady) setStageStatus('kline', 'K 线', error.message, true);
   });
@@ -2427,17 +2387,17 @@ async function analyze(symbol) {
     renderKline(data.klines, data.signal);
     chartReady = true;
     if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
-    setStageStatus('kline', 'K 线', '已更新');
+    updateKlineStatus(data.kline_status);
     renderFlow(data.flows);
     renderSignal(data.signal);
     renderCanslim(data.signal.canslim);
     renderKeyLevels(data.signal.key_levels);
     renderMarket(data.signal, data.breadth, data.breadth_status);
     const degraded = Object.keys(data.degraded || {}).length > 0;
-    setStageStatus('analysis', '分析', degraded ? '已完成（部分数据降级）' : '已完成', degraded);
+    setStageStatus('analysis', '分析', `${degraded ? '已完成（部分数据降级）' : '已完成'} ${formatDataTime(data.analyzed_at)}`, degraded);
 
     // 记录历史 & 更新自选星标
-    const _sName = data.quote ? data.quote.name : symbol;
+    const _sName = data.quote && data.quote.name ? data.quote.name : knownStockName(symbol);
     const _sAction = data.signal ? data.signal.action : '';
     const _sScore = data.signal ? data.signal.score : 0;
     const _sPrice = data.quote ? data.quote.price : 0;
@@ -2508,7 +2468,7 @@ async function refreshQuote(symbol) {
     }
   } catch(e) {
     if (session.active) {
-      setStageStatus('quote', '报价', '刷新失败，保留已显示数据', true);
+      markQuoteFailure(e);
       console.warn('[quote_refresh]', e);
     }
   } finally {
@@ -2525,6 +2485,8 @@ function refreshKlineLastCandle(q) {
   const d = new Date();
   const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   if (last.date !== today) return; // 非当日不更新
+  const quoteDay = q.timestamp && new Date(q.timestamp).toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+  if (quoteDay !== last.date) return;
 
   last.close = q.price;
   last.high = Math.max(last.high, q.high || q.price);
@@ -2943,11 +2905,6 @@ document.getElementById('wp-panel').addEventListener('click', e => e.stopPropaga
 
 // 跟踪当前股票名称（用于自选时获取名称）
 let _currentStockName = '';
-const _origUpdateQuote = updateQuote;
-updateQuote = function(q) {
-  _origUpdateQuote(q);
-  if (q && q.name) _currentStockName = q.name;
-};
 
 // ===== 启动 =====
 initializeFocusWatchlist();

@@ -29,6 +29,8 @@ class BreakoutResult:
     next_add_price: Optional[float] = None
     signals: List[str] = field(default_factory=list)
     description: str = ""
+    direction: str = "none"
+    stop_reference_price: Optional[float] = None
 
 
 def calc_true_range(high: float, low: float, pre_close: float) -> float:
@@ -130,25 +132,27 @@ def _analyze_system(klines: List[Kline], period: int, system_name: str) -> Break
             exit_price = stop
             sig_text = f"触及2N止损{stop:.2f}，空头平仓"
         else:
-            signal = "持仓"
+            signal = "持仓空头"
             exit_price = None
             sig_text = f"持有空头{holding_days}日，止损{stop:.2f}"
 
     return BreakoutResult(
         system=system_name,
         signal=signal,
-        breakout_price=round(channel_high, 2),
+        breakout_price=round(entry, 3),
         current_n=n_val,
-        stop_loss=round(stop, 2),
-        entry_price=round(entry, 2),
+        stop_loss=round(stop, 3),
+        entry_price=round(entry, 3),
         position_units=units,
-        exit_price=round(exit_price, 2) if exit_price else None,
-        channel_high=round(channel_high, 2),
-        channel_low=round(channel_low, 2),
-        next_add_price=round(next_add, 2) if next_add else None,
+        exit_price=round(exit_price, 3) if exit_price else None,
+        channel_high=round(channel_high, 3),
+        channel_low=round(channel_low, 3),
+        next_add_price=round(next_add, 3) if next_add else None,
         signals=[sig_text],
         description=f"{system_name.replace('(20日)', '').replace('(55日)', '')}"
                     f"入场={direction}@{entry:.2f}，N={n_val:.4f}，持有{holding_days}日",
+        direction="long" if direction == "多" else "short",
+        stop_reference_price=round(last_add_price if direction == "多" else entry, 3),
     )
 
 
