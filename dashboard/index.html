@@ -2200,6 +2200,33 @@ function renderMarket(signal, breadth, status = {}) {
 
 // ===== 行情显示 =====
 let _lastQuote = null;
+const QUOTE_SNAPSHOT_KEY = 'qs_quote_snapshots_v1';
+const QUOTE_SNAPSHOT_TTL_MS = 15 * 60 * 1000;
+const _quoteNames = new Map();
+
+function validStockName(name, symbol) {
+  return typeof name === 'string' && name.trim() && name !== symbol && !/^\d+$/.test(name.trim());
+}
+
+function readQuoteSnapshot(symbol) {
+  try {
+    const quote = JSON.parse(localStorage.getItem(QUOTE_SNAPSHOT_KEY) || '{}')[symbol];
+    const age = quote ? Date.now() - Date.parse(quote.fetched_at) : NaN;
+    return quote && quote.symbol === symbol && Number.isFinite(quote.price) && quote.price > 0
+      && age >= 0 && age <= QUOTE_SNAPSHOT_TTL_MS ? quote : null;
+  } catch (_) { return null; }
+}
+
+function rememberQuote(quote) {
+  try {
+    const snapshots = JSON.parse(localStorage.getItem(QUOTE_SNAPSHOT_KEY) || '{}');
+    snapshots[quote.symbol] = quote;
+    const recent = Object.entries(snapshots).filter(([, q]) =>
+      Date.now() - Date.parse(q.fetched_at) <= QUOTE_SNAPSHOT_TTL_MS
+    ).sort((a, b) => Date.parse(b[1].fetched_at) - Date.parse(a[1].fetched_at)).slice(0, 50);
+    localStorage.setItem(QUOTE_SNAPSHOT_KEY, JSON.stringify(Object.fromEntries(recent)));
+  } catch (_) { /* 存储不可用时仍可使用当前页面的报价。 */ }
+}
 
 function formatDataTime(value) {
   if (!value) return '未知';
@@ -2207,18 +2234,26 @@ function formatDataTime(value) {
   return Number.isNaN(date.getTime()) ? '未知' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 }
 
-function knownStockName(symbol) {
-  const known = getWatchlist().find(stock => stock.code === symbol && stock.name !== symbol)
-    || FOCUS_GROUPS.flatMap(group => group.stocks).find(stock => stock.code === symbol)
-    || getHistory().find(stock => stock.code === symbol && stock.name !== symbol);
-  return known ? known.name : symbol;
+function knownStockName(symbol, candidate = '') {
+  if (validStockName(candidate, symbol)) {
+    _quoteNames.set(symbol, candidate.trim());
+    return candidate.trim();
+  }
+  const matches = stock => stock.code === symbol && validStockName(stock.name, symbol);
+  const known = getWatchlist().find(matches)
+    || FOCUS_GROUPS.flatMap(group => group.stocks).find(matches)
+    || getHistory().find(matches);
+  return _quoteNames.get(symbol) || (known && known.name) || symbol;
 }
 
 function updateQuote(q, stale = false) {
   const el = document.getElementById('quote-bar');
   if (!q) { el.innerHTML = '<span class="qb-name flat">无行情</span>'; return; }
+  stale = stale || !!q.stale;
+  q = {...q, name: knownStockName(q.symbol || currentSymbol, q.name)};
   _lastQuote = q;
-  _currentStockName = q.name || knownStockName(q.symbol || currentSymbol);
+  _currentStockName = q.name;
+  if (!stale) rememberQuote(q);
   const cls = q.pct > 0 ? 'up' : q.pct < 0 ? 'down' : 'flat';
   const sign = q.pct > 0 ? '+' : '';
   const turnoverTip = `${q.turnover_source || '数据源提供的换手率'}。换手率可以超过100%，需结合品种交易机制和流通份额核实。`;
@@ -2229,6 +2264,15 @@ function updateQuote(q, stale = false) {
     <span class="qb-meta" title="${escHtml(turnoverTip)}">量${fmtVol(q.volume)}${escHtml(q.volume_unit || '手')} 换手${q.turnover.toFixed(1)}%（源值）</span>
     <span class="qb-timing" style="color:${stale ? '#ffc107' : '#888'}">${stale ? '旧数据 · ' : ''}报价时间 ${formatDataTime(q.timestamp)}；最后成功获取 ${formatDataTime(q.fetched_at)}（北京时间） · ${escHtml(q.source || '数据源未知')}</span>
   `;
+}
+
+function acceptQuote(q) {
+  updateQuote(q);
+  if (q.stale) {
+    setStageStatus('quote', '报价', `刷新失败，旧数据；最后成功获取 ${formatDataTime(q.fetched_at)}`, true);
+  } else {
+    setStageStatus('quote', '报价', `已更新（${q.source || '行情源'}）`);
+  }
 }
 
 function markQuoteFailure(error) {
@@ -2306,6 +2350,7 @@ async function doSearch() {
 function selectStock(code, name) {
   searchResults.style.display = 'none';
   searchInput.value = code;
+  knownStockName(code, name);
   analyze(code);
 }
 
@@ -2334,7 +2379,7 @@ async function analyze(symbol) {
   _dailyFlows = null;
   _lastSignalData = null;
   _currentStockName = '';
-  _lastQuote = null;
+  _lastQuote = readQuoteSnapshot(symbol);
   for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) chart.clear();
   for (const id of ['module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid', 'sa-stats', 'sa-detail', 'flow-summary']) {
     document.getElementById(id).textContent = '';
@@ -2348,6 +2393,10 @@ async function analyze(symbol) {
   document.getElementById('chanlun-daily-card').style.display = currentView === 'minute' ? 'none' : 'block';
   document.getElementById('chanlun-daily-label').textContent = currentView === 'week' ? '缠论周线分析' : '缠论日线分析';
   setStageStatus('quote', '报价', '加载中');
+  if (_lastQuote) {
+    updateQuote(_lastQuote, true);
+    setStageStatus('quote', '报价', `显示最近成功报价，正在刷新；获取于 ${formatDataTime(_lastQuote.fetched_at)}`, true);
+  }
   setStageStatus('kline', 'K 线', '加载中');
   setStageStatus('analysis', '分析', '加载中');
   setStageStatus('chanlun', '缠论', '加载中');
@@ -2360,9 +2409,8 @@ async function analyze(symbol) {
   // 按轻重顺序发出请求，每个阶段收到响应即渲染。
   session.quoteRefreshing = true;
   session.run('quote', `${API}/api/quote?${query}`, q => {
-    session.quoteReady = true;
-    updateQuote(q);
-    setStageStatus('quote', '报价', '已更新');
+    session.quoteReady = !q.stale;
+    acceptQuote(q);
   }, error => {
     markQuoteFailure(error);
   }).finally(() => { session.quoteRefreshing = false; });
@@ -2380,9 +2428,8 @@ async function analyze(symbol) {
   session.run('analysis', `${API}/api/analyze?${query}`, data => {
     analysisData = data;
     if (!session.quoteReady && data.quote) {
-      updateQuote(data.quote);
-      session.quoteReady = true;
-      setStageStatus('quote', '报价', '已更新');
+      acceptQuote(data.quote);
+      session.quoteReady = !data.quote.stale;
     }
     renderKline(data.klines, data.signal);
     chartReady = true;
@@ -2397,10 +2444,10 @@ async function analyze(symbol) {
     setStageStatus('analysis', '分析', `${degraded ? '已完成（部分数据降级）' : '已完成'} ${formatDataTime(data.analyzed_at)}`, degraded);
 
     // 记录历史 & 更新自选星标
-    const _sName = data.quote && data.quote.name ? data.quote.name : knownStockName(symbol);
+    const _sName = knownStockName(symbol, data.quote && data.quote.name);
     const _sAction = data.signal ? data.signal.action : '';
     const _sScore = data.signal ? data.signal.score : 0;
-    const _sPrice = data.quote ? data.quote.price : 0;
+    const _sPrice = data.quote && !data.quote.stale ? data.quote.price : 0;
     addHistory(symbol, _sName, _sAction, _sScore);
     updateStarButton(symbol);
 
@@ -2452,9 +2499,8 @@ async function refreshQuote(symbol) {
   try {
     const q = await session.request(`${API}/api/quote?symbol=${encodeURIComponent(symbol)}`);
     if (session.active) {
-      updateQuote(q);
-      session.quoteReady = true;
-      setStageStatus('quote', '报价', '已更新');
+      acceptQuote(q);
+      session.quoteReady = !q.stale;
       // K线最后一根蜡烛跟随实时行情更新
       refreshKlineLastCandle(q);
       if (currentView === 'minute') {
@@ -2478,7 +2524,7 @@ async function refreshQuote(symbol) {
 
 // 用最新行情刷新K线最后一根蜡烛（日线实时感）
 function refreshKlineLastCandle(q) {
-  if (!_klineData.length || !q || !q.price) return;
+  if (!_klineData.length || !q || !q.price || q.stale) return;
   // 周K视图不实时刷新最后一根蜡烛（周K是聚合数据，实时更新会误导）
   if (currentView === 'week') return;
   const last = _klineData[_klineData.length - 1];
@@ -3228,8 +3274,9 @@ async function loadOverview() {
       const q = await r.json();
       if (q.error) return { code: s.code, name: s.name, error: true };
       return {
-        code: s.code, name: q.name || s.name,
+        code: s.code, name: knownStockName(s.code, q.name),
         price: q.price, pct: q.pct, volume: q.volume,
+        stale: !!q.stale, fetched_at: q.fetched_at,
         action: s.action || '', score: s.score || 0,
       };
     } catch(e) {
@@ -3250,7 +3297,7 @@ async function loadOverview() {
     return `<div class="wp-ov-item" onclick="analyze('${s.code}');closePanel()">
       <span class="wp-ov-code">${s.code}</span>
       <span class="wp-ov-name">${escHtml(s.name)}</span>
-      <span class="wp-ov-pct ${pctCls}">${pctStr}</span>
+      <span class="wp-ov-pct ${pctCls}" title="${s.stale ? '旧数据，最后成功获取 ' + formatDataTime(s.fetched_at) : ''}">${pctStr}${s.stale ? '（旧）' : ''}</span>
       <span class="wp-ov-score" style="color:${scoreColor}">${scoreStr}</span>
       <span class="wp-ov-sig">${sigTag}</span>
     </div>`;

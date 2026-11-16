@@ -89,7 +89,8 @@ def quote_to_dict(q: Quote) -> dict:
         "turnover": q.turnover,
         "timestamp": q.timestamp, "fetched_at": q.fetched_at,
         "source": q.source, "volume_unit": q.volume_unit,
-        "turnover_source": "东方财富提供的换手率，按数据源原值展示",
+        "turnover_source": f"{q.source}提供的换手率，按数据源原值展示",
+        "stale": q.stale, "refresh_error": q.refresh_error,
     }
 
 
@@ -217,6 +218,8 @@ def handle_analyze(params: dict) -> dict:
                 "degraded": degraded, "timings_ms": timings}
     klines = enrich_klines(klines, data.get("kline_extras", {}))
     quote = data.get("quote")
+    if quote and quote.stale:
+        degraded["quote"] = f"实时报价刷新失败，显示最近成功报价（{quote.fetched_at}）"
     flows = data.get("fund_flow", [])
     index_klines = data.get("index")
     breadth_started = time.monotonic()
@@ -228,7 +231,7 @@ def handle_analyze(params: dict) -> dict:
 
     # 运行分析
     analysis_started = time.monotonic()
-    result = run_analysis(klines, quote, flows, index_klines)
+    result = run_analysis(klines, None if quote and quote.stale else quote, flows, index_klines)
 
     # 后处理：用市场宽度修正M评分（加密模块无法内部修改，在此修正）
     signal_data = signal_to_dict(result)
@@ -453,6 +456,8 @@ def _scan_one_stock(symbol: str, period: str, index_klines, breadth) -> dict:
         if len(klines) < 30:
             return None
         quote = fetch_quote(symbol)
+        if quote and quote.stale:
+            return None
         flows = fetch_fund_flow(symbol, days=30)
 
         result = run_analysis(klines, quote, flows, index_klines)

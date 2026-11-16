@@ -226,6 +226,7 @@ class DataProvenanceTests(unittest.TestCase):
         source = {"data": {"f58": "测试ETF", "f43": 114.16, "f47": 10810000,
                            "f168": 137.6, "f86": 1794812400, "f124": 0}}
         with patch.object(fetcher, "_cache_get", return_value=None), \
+                patch.object(fetcher, "_fetch_quote_tencent", return_value=None), \
                 patch.object(fetcher, "_get_json_eastmoney", return_value=source) as request:
             quote = fetcher.fetch_quote("999711")
         self.assertEqual(quote.turnover, 137.6)

@@ -1,16 +1,17 @@
-"""数据层：K线(腾讯前复权+东财补充成交额) + 实时行情(东财) + 资金流(东财) + 搜索(东财)。
+"""数据层：K线(腾讯+东财补充) + 实时行情(腾讯/东财) + 资金流和搜索(东财)。
 
 参考《A股资金流向监控工具-个股增强版》的host池轮换、fltt=2、session复用设计。
 
 数据源策略：
 - K线价格/成交量：腾讯API前复权（价格准确，和行情一致）
 - K线成交额/换手率：东财K线API（有值，按日期匹配补充）
-- 实时行情：东财stock/get（fltt=2，价格不除100）
+- 实时行情：腾讯报价优先，东方财富独立回退；失败保留有时限的成功快照
 - 资金流：东财fflow/daykline（push2his优先，push2test备选）
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -19,7 +20,7 @@ import logging
 import threading
 import concurrent.futures
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # 便携依赖目录：无内置 python/ 时，从发行包 libs/ 加载第三方依赖
@@ -31,7 +32,7 @@ import requests
 from urllib3.util import Timeout
 
 from data.request_runtime import (
-    HTTP_ATTEMPT_SECONDS, collect_stages, data_stage, remaining_seconds, request_id,
+    HTTP_ATTEMPT_SECONDS, collect_stages, data_stage, deadline_scope, remaining_seconds, request_id,
 )
 
 log = logging.getLogger("trend_data")
@@ -87,6 +88,10 @@ HIS_HOSTS = [
 ]
 SEARCH_HOST = "https://searchapi.eastmoney.com"
 TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+TENCENT_QUOTE = "https://qt.gtimg.cn/"
+QUOTE_SOURCE_BUDGET_SECONDS = 1.2
+QUOTE_STALE_TTL_SECONDS = 15 * 60
+QUOTE_RETRY_SECONDS = 10
 
 UA_POOL = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -527,16 +532,69 @@ class Quote:
     fetched_at: str = ""
     source: str = "东方财富"
     volume_unit: str = "手"
+    stale: bool = False
+    refresh_error: str = ""
 
 
 @data_stage
 def fetch_quote(symbol: str) -> Optional[Quote]:
-    """实时行情。东财stock/get，fltt=2价格不除100。2秒缓存保证秒级实时性。"""
+    """独立报价源依次限时尝试；失败不会删除或刷新成功快照的时间。"""
     cache_key = f"quote_{symbol}"
     cached = _cache_get(cache_key, _RT_CACHE_TTL)
     if cached:
         return cached
+    previous = _cache_get(cache_key, QUOTE_STALE_TTL_SECONDS)
+    retry_key = f"quote_retry_{symbol}"
+    last_error = _cache_get(retry_key, QUOTE_RETRY_SECONDS)
+    if not last_error:
+        failures = []
+        for source, fetcher in (("腾讯", _fetch_quote_tencent), ("东方财富", _fetch_quote_eastmoney)):
+            try:
+                with deadline_scope(time.monotonic() + QUOTE_SOURCE_BUDGET_SECONDS):
+                    quote = fetcher(symbol)
+                if quote and math.isfinite(quote.price) and quote.price > 0:
+                    if (not quote.name or quote.name == symbol) and previous:
+                        quote = replace(quote, name=previous.name)
+                    _cache_set(cache_key, quote)
+                    return quote
+                failures.append(f"{source}未返回有效报价")
+            except (requests.RequestException, OSError, ValueError) as exc:
+                failures.append(f"{source}请求失败或超时")
+                log.warning("quote_source_failed symbol=%s source=%s error=%s", symbol, source, exc)
+        last_error = "；".join(failures)
+        _cache_set(retry_key, last_error)
+    if previous:
+        return replace(previous, stale=True, refresh_error=last_error)
+    raise OSError(f"报价暂不可用：{last_error}；稍后重试")
 
+
+def _fetch_quote_tencent(symbol: str) -> Optional[Quote]:
+    code = f"bj{symbol}" if symbol.startswith("920") else symbol_to_tencent(symbol)
+    response = _http_get(TENCENT_QUOTE, params={"q": code})
+    text = response.content.decode("gb18030")
+    if '="' not in text:
+        return None
+    fields = text.split('="', 1)[1].split('"', 1)[0].split("~")
+    if len(fields) < 39 or fields[2] != symbol:
+        return None
+
+    def number(index):
+        return _to_float(fields[index]) or 0.0
+
+    timestamp = datetime.strptime(fields[30], "%Y%m%d%H%M%S").replace(
+        tzinfo=timezone(timedelta(hours=8))).astimezone(timezone.utc).isoformat(timespec="seconds")
+    trade = fields[35].split("/")
+    amount = (_to_float(trade[2]) if len(trade) >= 3 else None)
+    return Quote(
+        symbol=symbol, name=fields[1].strip(), price=number(3), pct=number(32),
+        change=number(31), high=number(33), low=number(34), open=number(5),
+        pre_close=number(4), volume=number(6),
+        amount=amount if amount is not None else number(37) * 10000,
+        turnover=number(38), timestamp=timestamp, fetched_at=utc_now(), source="腾讯",
+    )
+
+
+def _fetch_quote_eastmoney(symbol: str) -> Optional[Quote]:
     secid = symbol_to_secid(symbol)
     params = {
         "secid": secid,
@@ -565,7 +623,6 @@ def fetch_quote(symbol: str) -> Optional[Quote]:
             timestamp=_quote_timestamp(d.get("f86")) or _quote_timestamp(d.get("f124")),
             fetched_at=utc_now(),
         )
-        _cache_set(cache_key, q)
         return q
     return None
 

@@ -107,7 +107,8 @@ class RuntimeTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            with patch.object(fetcher, "QUOTE_HOSTS", [f"http://127.0.0.1:{server.server_port}"]):
+            with patch.object(fetcher, "QUOTE_HOSTS", [f"http://127.0.0.1:{server.server_port}"]), \
+                    patch.object(fetcher, "_fetch_quote_tencent", return_value=None):
                 started = time.monotonic()
                 values, errors, _ = collect_stages({"quote": lambda: fetcher.fetch_quote("999998")},
                                                   required=("quote",), budget=0.08)
@@ -190,6 +191,99 @@ class BreadthTests(unittest.TestCase):
         self.assertEqual(result["total"], 200)
         self.assertEqual(result["breadth_ratio"], 0.5)
         self.assertEqual(source.call_count, 2)
+
+
+class QuoteFallbackTests(unittest.TestCase):
+    def quote(self):
+        return fetcher.Quote("999996", "测试ETF", 10.08, 0.8, 0.08, 10.1, 9.9,
+                             10, 10, 400, 403200, 1.23,
+                             timestamp="2026-11-16T07:30:00+00:00",
+                             fetched_at="2026-11-16T07:30:01+00:00")
+
+    def test_tencent_quote_decodes_name_time_and_preserves_units(self):
+        fields = [""] * 39
+        for index, value in {1: "测试ETF", 2: "999996", 3: "10.08", 4: "10",
+                             5: "10", 6: "400", 30: "20261116153000", 31: "0.08",
+                             32: "0.8", 33: "10.1", 34: "9.9",
+                             35: "10.08/400/403200", 37: "40.32", 38: "1.23"}.items():
+            fields[index] = value
+        body = ('v_sz999996="' + "~".join(fields) + '";').encode("gb18030")
+        with patch.object(fetcher, "_http_get", return_value=Mock(content=body)):
+            quote = fetcher._fetch_quote_tencent("999996")
+        self.assertEqual(quote.name, "测试ETF")
+        self.assertEqual(quote.volume, 400)
+        self.assertEqual(quote.amount, 403200)
+        self.assertEqual(quote.timestamp, "2026-11-16T07:30:00+00:00")
+        self.assertEqual(app.quote_to_dict(quote)["turnover_source"], "腾讯提供的换手率，按数据源原值展示")
+
+    def test_tencent_success_does_not_wait_for_eastmoney(self):
+        with patch.object(fetcher, "_cache_get", return_value=None), \
+                patch.object(fetcher, "_cache_set"), \
+                patch.object(fetcher, "_fetch_quote_tencent", return_value=self.quote()), \
+                patch.object(fetcher, "_fetch_quote_eastmoney") as backup:
+            result = fetcher.fetch_quote("999996")
+        self.assertEqual(result.price, 10.08)
+        backup.assert_not_called()
+
+    def test_tencent_failure_uses_independent_eastmoney_source(self):
+        with patch.object(fetcher, "_cache_get", return_value=None), \
+                patch.object(fetcher, "_cache_set"), \
+                patch.object(fetcher, "_fetch_quote_tencent", side_effect=OSError("timeout")), \
+                patch.object(fetcher, "_fetch_quote_eastmoney", return_value=self.quote()) as backup:
+            result = fetcher.fetch_quote("999996")
+        self.assertFalse(result.stale)
+        backup.assert_called_once_with("999996")
+
+    def test_all_sources_failing_preserves_successful_snapshot_and_timestamp(self):
+        previous = self.quote()
+
+        def cached(key, ttl):
+            return previous if key == "quote_999996" and ttl == fetcher.QUOTE_STALE_TTL_SECONDS else None
+
+        with patch.object(fetcher, "_cache_get", side_effect=cached), \
+                patch.object(fetcher, "_cache_set") as save, \
+                patch.object(fetcher, "_fetch_quote_tencent", side_effect=OSError("down")), \
+                patch.object(fetcher, "_fetch_quote_eastmoney", return_value=None):
+            result = fetcher.fetch_quote("999996")
+        self.assertTrue(result.stale)
+        self.assertFalse(previous.stale)
+        self.assertEqual(result.price, previous.price)
+        self.assertEqual(result.fetched_at, previous.fetched_at)
+        self.assertEqual(result.timestamp, previous.timestamp)
+        self.assertTrue(result.refresh_error)
+        self.assertEqual(save.call_args.args[0], "quote_retry_999996")
+
+    def test_first_failure_has_no_fabricated_quote_and_retries_are_throttled(self):
+        with patch.object(fetcher, "_cache_get", return_value=None), \
+                patch.object(fetcher, "_cache_set"), \
+                patch.object(fetcher, "_fetch_quote_tencent", return_value=None), \
+                patch.object(fetcher, "_fetch_quote_eastmoney", return_value=None):
+            with self.assertRaisesRegex(OSError, "报价暂不可用"):
+                fetcher.fetch_quote("999996")
+        with patch.object(fetcher, "_cache_get", side_effect=lambda key, ttl: "稍后重试" if "retry" in key else None), \
+                patch.object(fetcher, "_fetch_quote_tencent") as primary, \
+                patch.object(fetcher, "_fetch_quote_eastmoney") as backup:
+            with self.assertRaises(OSError):
+                fetcher.fetch_quote("999996")
+        primary.assert_not_called()
+        backup.assert_not_called()
+
+    def test_analysis_displays_stale_quote_without_using_it_as_live_input(self):
+        quote = self.quote()
+        quote.stale = True
+        data = {"kline": sample_klines(), "quote": quote, "index": [],
+                "fund_flow": [], "kline_extras": {}}
+        with patch.object(app, "collect_stages", return_value=(data, {}, {})), \
+                patch.object(app, "run_analysis", wraps=app.run_analysis) as analyze:
+            result = app.handle_analyze({"symbol": ["999996"]})
+        self.assertIsNone(analyze.call_args.args[1])
+        self.assertTrue(result["quote"]["stale"])
+        self.assertIn("quote", result["degraded"])
+        with patch.object(app, "fetch_kline", return_value=sample_klines()), \
+                patch.object(app, "fetch_quote", return_value=quote), \
+                patch.object(app, "fetch_fund_flow") as flows:
+            self.assertIsNone(app._scan_one_stock("999996", "day", [], None))
+        flows.assert_not_called()
 
 
 class ApiTests(unittest.TestCase):
