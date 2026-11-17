@@ -242,7 +242,7 @@ class BreadthTests(unittest.TestCase):
         with patch.object(fetcher, "_fetch_breadth_page", side_effect=[
                 {"total": 200, "diff": rows}, {"total": 200, "diff": rows[:50]}]):
             with self.assertRaises(ValueError):
-                fetcher.collect_market_breadth()
+                fetcher._collect_market_breadth_eastmoney()
 
     def test_first_page_is_fetched_once_and_all_rows_counted(self):
         def page(number):
@@ -250,7 +250,7 @@ class BreadthTests(unittest.TestCase):
                 {"f12": str(number * 100 + i), "f13": 1, "f3": 1 if number == 1 else -1}
                 for i in range(100)]}
         with patch.object(fetcher, "_fetch_breadth_page", side_effect=page) as source:
-            result = fetcher.collect_market_breadth()
+            result = fetcher._collect_market_breadth_eastmoney()
         self.assertEqual(result["total"], 200)
         self.assertEqual(result["breadth_ratio"], 0.5)
         self.assertEqual(source.call_count, 2)

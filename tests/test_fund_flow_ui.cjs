@@ -82,3 +82,66 @@ test('实时图显示实际来源和统计口径，切源时整组替换', () =>
   assert.equal(page.chart.option.series[0].data.length, 1);
   assert.equal(page.chart.option.series[0].data[0].value, -0.0001);
 });
+
+test('盘前说明、五类资金和分时明细同时展示', () => {
+  const page = setup();
+  page.run(`renderRealtimeFlow({source:'腾讯', data_date:'2026-11-16', is_today:false,
+    session_note:'今日尚未进入连续交易，显示最近可用交易日 2026-11-16 的数据',
+    flows:[{time:'15:00', main_net:6000000,super_large_net:-683000000,large_net:689000000,medium_net:-2000000,small_net:-4000000}],
+    summary:{main_net:6000000,super_large_net:-683000000,large_net:689000000,medium_net:-2000000,small_net:-4000000}})`);
+  assert.match(page.nodes.get('flow-meta').textContent, /今日尚未进入连续交易/);
+  assert.match(page.nodes.get('flow-meta').textContent, /主力净额 = 超大单净额 \+ 大单净额/);
+  assert.match(page.nodes.get('flow-summary').innerHTML, /大单.*\+6.89亿.*中单.*小单/);
+  assert.match(page.nodes.get('flow-details').innerHTML, /分时累计明细.*15:00.*68900\.00/s);
+  assert.equal(page.chart.option.series.length, 5);
+});
+
+test('分析刷新清空旧风险；报价恢复后历史报价故障不再作为当前故障', () => {
+  const nodes = new Map();
+  const context = vm.createContext({
+    document: {getElementById(id) {
+      if (!nodes.has(id)) nodes.set(id, {textContent:'20:26旧错误',style:{display:'block'}});
+      return nodes.get(id);
+    }}, formatDataTime: value => value,
+  });
+  vm.runInContext(html.slice(html.indexOf('function setStageStatus('), html.indexOf('async function analyze(')), context);
+  vm.runInContext('clearAnalysisPanels()', context);
+  assert.equal(nodes.get('risk-list').textContent, '');
+  assert.equal(nodes.get('market-body').textContent, '');
+  assert.equal(nodes.get('risk-card').style.display, 'none');
+  vm.runInContext(`renderAnalysisStatus({quoteReady:true,analysisData:{analyzed_at:'09:35',degraded:{quote:'数据源返回空结果'}}})`, context);
+  assert.equal(nodes.get('status-analysis').textContent, '分析：已完成 09:35');
+});
+
+test('过期中枢只显示在历史区域，不作为最近有效中枢', () => {
+  const nodes = new Map();
+  const context = vm.createContext({currentView:'dayk',escHtml: value => value,
+    document:{getElementById(id) {if(!nodes.has(id)) nodes.set(id,{style:{},innerHTML:''}); return nodes.get(id);}},
+  });
+  vm.runInContext(html.slice(html.indexOf('function renderChanlunDaily('), html.indexOf('// ===== 日K线缠论图表叠加')), context);
+  vm.runInContext(`renderChanlunDaily({zhongshus:[{zd:1.199,zg:1.213,expired:true}],latest_zhongshu:null,
+    expired_zhongshus:[{zd:1.199,zg:1.213,end_date:'2026-10-15',expiry_reason:'偏离现价17.66%'}]})`, context);
+  const rendered = nodes.get('chanlun-daily-body').innerHTML;
+  assert.match(rendered, /暂无有效中枢/);
+  assert.match(rendered, /已过期中枢.*偏离现价17.66%/);
+  assert.doesNotMatch(rendered, /最近中枢 <b>/);
+});
+
+test('周期刷新替换缠论叠加层，并清除已过期的中枢矩形', () => {
+  let series = {type:'candlestick',name:'K线',markPoint:{data:[{name:'止损'}]},markLine:{data:[]}};
+  const context = vm.createContext({_klineData:[],_signalPoints:[],C:{up:'red',down:'green'},
+    klineChart:{getOption:()=>({series:[series]}),setOption:option=>{series={...series,...option.series[0]};}},
+  });
+  vm.runInContext(html.slice(html.indexOf('function applyChanlunDailyOverlay('), html.indexOf('function renderMinute(')), context);
+  const payload = {chart_signals:[{symbol:'triangle',coord:['2026-11-16',1.06]}],
+    chart_strokes:[{coords:[['2026-11-12',1],['2026-11-16',1.06]]}],
+    chart_zhongshus:[{xAxis:['2026-11-12','2026-11-16'],yAxis:[1,1.01]}]};
+  vm.runInContext(`applyChanlunDailyOverlay(${JSON.stringify(payload)})`, context);
+  vm.runInContext(`applyChanlunDailyOverlay(${JSON.stringify(payload)})`, context);
+  assert.equal(series.markPoint.data.length, 2);
+  assert.equal(series.markLine.data.length, 1);
+  vm.runInContext('applyChanlunDailyOverlay({})', context);
+  assert.equal(series.markArea.data.length, 0);
+  assert.equal(series.markPoint.data.length, 1);
+  assert.equal(series.markLine.data.length, 0);
+});

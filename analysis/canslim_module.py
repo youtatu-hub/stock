@@ -100,7 +100,7 @@ def _calc_n_score(klines: List[Kline]) -> Tuple[int, str, Optional[dict]]:
     dist = (high_250 - price) / high_250 * 100 if high_250 else 100
     cup_handle = _detect_cup_handle(klines)
     # 创近期新高：突破近120日高点（排除今日）→ 100
-    high_120_prev = max(k.high for k in klines[-121:-1]) if len(klines) >= 121 else 0.0
+    high_120_prev = max(k.high for k in klines[-121:-1])
     if price >= high_120_prev:
         score = 100
     elif dist < 3.0:
@@ -119,7 +119,6 @@ def _calc_n_score(klines: List[Kline]) -> Tuple[int, str, Optional[dict]]:
 
 def _calc_s_score(klines: List[Kline], quote: Optional[Quote]) -> Tuple[int, str]:
     """S - 供需关系：40 基准，量比缩量 -2，放量加分（样本反推）。"""
-    turnover = (quote.turnover if quote and quote.turnover else klines[-1].turnover) or 0.0
     if len(klines) >= 6:
         vol_ratio = klines[-1].volume / (sum(k.volume for k in klines[-6:-1]) / 5)
     else:
@@ -199,16 +198,10 @@ def _calc_i_score(flows: Optional[List[FundFlow]]) -> Tuple[int, str]:
 
 
 def _calc_m_score(index_klines: Optional[List[Kline]], stock_klines: List[Kline]) -> Tuple[int, str]:
-    """M - 大盘环境：优先用上证指数；无指数数据时用个股均线 + 上涨天数（样本反推）。"""
-    if not index_klines or len(index_klines) < 30:
-        src = stock_klines
-        src_name = "个股均线(近似)"
-    else:
-        src = index_klines
-        src_name = "大盘指数"
-    src = index_klines if index_klines and len(index_klines) >= 30 else stock_klines
-    if len(src) < 30:
-        return 50, ""
+    """M使用显式传入的指数；缺失时显示中性占位，不改用个股冒充大盘。"""
+    if not index_klines or len(index_klines) < 60:
+        return 50, "M(市场环境)指数数据不足，50分为中性占位"
+    src = index_klines
     closes = [k.close for k in src]
     ma20 = sma_series(closes, 20)
     ma60 = sma_series(closes, 60)
@@ -219,19 +212,14 @@ def _calc_m_score(index_klines: Optional[List[Kline]], stock_klines: List[Kline]
         return 50, ""
 
     up_days20 = sum(1 for i in range(len(closes) - 20, len(closes)) if closes[i] > closes[i - 1])
-    # MA20 方向（对 MA 序列末段比较）
-    ma20_rising = len(ma20) >= 2 and ma20[-1] >= ma20[-6]
-    ma20_txt = "向上" if ma20_rising else "向下"
     if ma20_val > ma60_val and up_days20 >= 13:
         score = 80  # 多头且近20日上涨天数多（8/8 反推：加密最高 80）
     elif ma20_val > ma60_val and up_days20 >= 7:
         score = 70
     elif ma20_val > ma60_val:
         score = 60
-    elif src_name == "大盘指数":
-        score = 15  # 指数空头 → 15（全链路 8/8 反推）
     else:
-        score = 35  # 个股回退空头 → 35（模块级 8/8 反推）
+        score = 15  # 指数空头 → 15（全链路 8/8 反推）
     return score, f"M(市场环境){score}分"
 
 
@@ -317,6 +305,7 @@ def analyze_canslim(
     quote: Optional[Quote] = None,
     flows: Optional[List[FundFlow]] = None,
     index_klines: Optional[List[Kline]] = None,
+    breadth: Optional[dict] = None,
 ) -> CanslimResult:
     """CANSLIM 综合分析。"""
     c_score, c_text = _calc_c_score(klines)
@@ -326,6 +315,14 @@ def analyze_canslim(
     l_score, l_text = _calc_l_score(klines)
     i_score, i_text = _calc_i_score(flows)
     m_score, m_text = _calc_m_score(index_klines, klines)
+    breadth_text = ""
+    if breadth and breadth.get("total", 0) >= 100 and breadth.get("up", 0) + breadth.get("down", 0) > 0:
+        ratio = breadth["breadth_ratio"]
+        bonus = next((bonus for threshold, bonus in ((0.7, 15), (0.6, 10), (0.5, 5), (0.4, -5), (0.3, -10))
+                      if ratio >= threshold), -15)
+        m_score = max(0, min(100, m_score + bonus))
+        m_text = f"M(市场环境){m_score}分"
+        breadth_text = f"市场宽度{breadth['up']}涨/{breadth['down']}跌，{ratio * 100:.0f}%上涨（{breadth.get('source', '宽度源')}）"
 
     # 加权总分（int 截断）：C15% A10% N25% S5% L20% I15% M10%
     # 权重与计算公式经 8 只基准股 A/B 回归约束求解得出。
@@ -336,6 +333,10 @@ def analyze_canslim(
     grade = _calc_grade(total)
 
     signals = []
+    if not index_klines or len(index_klines) < 60:
+        signals.append("指数数据不足，大盘评分含中性占位")
+    if breadth_text:
+        signals.append(breadth_text)
     if c_score >= 65:
         signals.append(c_text)
     if a_score >= 65:

@@ -13,6 +13,8 @@ from typing import List, Optional, Tuple
 ANALYSIS_WINDOW = 60
 SIGNAL_MAX_AGE_BARS = 10
 SIGNAL_MAX_DEVIATION = 0.10
+ZHONGSHU_MAX_AGE_BARS = 20
+ZHONGSHU_MAX_DEVIATION = 0.10
 
 
 @dataclass
@@ -61,6 +63,10 @@ class Zhongshu:
     historical_break_date: str = ""
     break_stroke_idx: int = -1
     current_position: str = "inside"
+    expired: bool = False
+    expiry_reason: str = ""
+    age_bars: int = 0
+    deviation_pct: float = 0.0
 
 
 @dataclass
@@ -273,6 +279,17 @@ def find_zhongshus(strokes: List[DailyStroke], dates: List[str],
         z.current_position = _close_position(closes[-1], z) if closes else "inside"
         z.is_broken = z.current_position != "inside"
         z.break_direction = z.current_position if z.is_broken else ""
+        z.age_bars = sum(date > z.end_date for date in dates)
+        price = closes[-1] if closes else 0
+        distance = max(z.zd - price, price - z.zg, 0) / price if price > 0 else 0
+        z.deviation_pct = round(distance * 100, 2)
+        reasons = []
+        if z.age_bars > ZHONGSHU_MAX_AGE_BARS:
+            reasons.append(f"形成后已过{z.age_bars}根K线（上限{ZHONGSHU_MAX_AGE_BARS}根）")
+        if distance > ZHONGSHU_MAX_DEVIATION and not math.isclose(distance, ZHONGSHU_MAX_DEVIATION):
+            reasons.append(f"中枢边界偏离现价{z.deviation_pct:.2f}%（上限{ZHONGSHU_MAX_DEVIATION * 100:g}%）")
+        z.expired = bool(reasons)
+        z.expiry_reason = "；".join(reasons)
     return zhongshus
 
 
@@ -404,14 +421,16 @@ def generate_daily_signals(strokes: List[DailyStroke],
                     type="buy3", price=retro.end_price, date=retro.end_date,
                     confidence=75,
                     invalidation_price=z.zg,
-                    description="三类买点：中枢[{0:.2f}-{1:.2f}]向上突破后回踩，未回到中枢内".format(z.zd, z.zg)))
+                    description="三类买点：中枢[{0:.3f}-{1:.3f}]向上突破后回踩，未回到中枢内".format(z.zd, z.zg)
+                    + ("（关联历史中枢已过期，仅用于说明信号形成过程）" if z.expired else "")))
         else:  # 向下突破 -> 三类卖点（反弹笔为向上笔）
             if retro.direction == "up" and retro.end_price < z.zd:
                 sell3_list.append(ChanlunDailySignal(
                     type="sell3", price=retro.end_price, date=retro.end_date,
                     confidence=75,
                     invalidation_price=z.zd,
-                    description="三类卖点：中枢[{0:.2f}-{1:.2f}]向下突破后反弹，未回到中枢内".format(z.zd, z.zg)))
+                    description="三类卖点：中枢[{0:.3f}-{1:.3f}]向下突破后反弹，未回到中枢内".format(z.zd, z.zg)
+                    + ("（关联历史中枢已过期，仅用于说明信号形成过程）" if z.expired else "")))
     sell3_list.sort(key=lambda s: s.date)
     buy3_list.sort(key=lambda s: s.date)
 
@@ -458,22 +477,23 @@ def _describe_state(strokes: List[DailyStroke],
                     fractal_count: int) -> Tuple[str, str, str]:
     """生成 current_state / summary / description 三段文本。"""
     last_stroke = strokes[-1] if strokes else None
+    active_zones = [zone for zone in zhongshus if not zone.expired]
 
-    if zhongshus:
-        last_z = zhongshus[-1]
+    if active_zones:
+        last_z = active_zones[-1]
         if last_z.is_broken:
             zs_text = "最新收盘价在上沿之上（向上突破）" if last_z.break_direction == "up" else "最新收盘价在下沿之下（向下突破）"
         else:
             zs_text = "最新收盘价处于[{0:.3f}-{1:.3f}]内".format(last_z.zd, last_z.zg)
     else:
-        zs_text = "无中枢"
+        zs_text = "暂无有效中枢" + ("（历史中枢已过期）" if zhongshus else "")
 
     latest = max((signal for signal in signals if not signal.expired),
                  key=lambda signal: (signal.date, signal.type), default=None)
     if last_stroke:
         direction_cn = "向上" if last_stroke.direction == "up" else "向下"
         state = f"最近完成笔{direction_cn}（截至{last_stroke.end_date}），最近中枢{zs_text}"
-        if zhongshus and zhongshus[-1].is_broken and last_stroke.direction != zhongshus[-1].break_direction:
+        if active_zones and active_zones[-1].is_broken and last_stroke.direction != active_zones[-1].break_direction:
             state += "；笔方向与当前中枢位置不同，需结合后续笔确认"
     else:
         state = f"尚无完成笔，最近中枢{zs_text}"
@@ -524,7 +544,7 @@ def _build_chart_overlay(fractals: List[DailyFractal],
         "break_direction": z.break_direction,
         "zg": z.zg,
         "zd": z.zd,
-    } for z in zhongshus]
+    } for z in zhongshus if not z.expired]
 
     chart_signals = []
     for s in signals:
@@ -586,12 +606,23 @@ def daily_result_to_dict(result: ChanlunDailyResult) -> dict:
 
     signals = sorted(result.signals, key=lambda signal: (signal.date, signal.type), reverse=True)
     active_signals = [signal_to_dict(signal) for signal in signals if not signal.expired]
+    zones = [{"start_date": z.start_date, "end_date": z.end_date,
+              "zg": z.zg, "zd": z.zd, "zz": z.zz,
+              "is_broken": z.is_broken, "break_direction": z.break_direction,
+              "current_position": z.current_position,
+              "historical_break_direction": z.historical_break_direction,
+              "historical_break_date": z.historical_break_date,
+              "expired": z.expired, "expiry_reason": z.expiry_reason,
+              "age_bars": z.age_bars, "deviation_pct": z.deviation_pct}
+             for z in result.zhongshus]
     return {
         "current_price": result.current_price,
         "as_of": result.as_of,
         "analysis_window": ANALYSIS_WINDOW,
         "signal_max_age_bars": SIGNAL_MAX_AGE_BARS,
         "signal_max_deviation_pct": SIGNAL_MAX_DEVIATION * 100,
+        "zhongshu_max_age_bars": ZHONGSHU_MAX_AGE_BARS,
+        "zhongshu_max_deviation_pct": ZHONGSHU_MAX_DEVIATION * 100,
         "kline_count": result.kline_count,
         "merged_count": result.merged_count,
         "fractal_count": result.fractal_count,
@@ -606,13 +637,9 @@ def daily_result_to_dict(result: ChanlunDailyResult) -> dict:
                      "start_date": s.start_date, "end_date": s.end_date,
                      "macd_area": round(s.macd_area, 2),
                      "has_divergence": s.has_divergence} for s in result.strokes],
-        "zhongshus": [{"start_date": z.start_date, "end_date": z.end_date,
-                       "zg": z.zg, "zd": z.zd, "zz": z.zz,
-                       "is_broken": z.is_broken, "break_direction": z.break_direction,
-                       "current_position": z.current_position,
-                       "historical_break_direction": z.historical_break_direction,
-                       "historical_break_date": z.historical_break_date}
-                      for z in result.zhongshus],
+        "zhongshus": zones,
+        "latest_zhongshu": next((z for z in reversed(zones) if not z["expired"]), None),
+        "expired_zhongshus": [z for z in zones if z["expired"]],
         "signals": active_signals,
         "latest_signal": active_signals[0] if active_signals else None,
         "expired_signals": [signal_to_dict(signal) for signal in signals if signal.expired],

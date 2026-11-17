@@ -162,20 +162,22 @@ def analyze_volume_price(
 ) -> VolumePriceResult:
     """量价综合分析。返回 VolumePriceResult。"""
     pattern, direction, base = _classify_price_volume(klines)
-    # 量比 = quote 现量 / 前5日均量（加密版实测口径）
-    if quote and len(klines) >= 6:
+    # 价格和成交量取同一根K线，避免盘前零成交报价污染上一交易日评分。
+    if len(klines) >= 6:
         avg5 = sum(k.volume for k in klines[-6:-1]) / max(1, len(klines[-6:-1]))
-        volume_ratio = round(quote.volume / avg5, 2) if avg5 else 1.0
+        volume_ratio = round(klines[-1].volume / avg5, 2) if avg5 else 1.0
     else:
         volume_ratio = 1.0
 
-    turnover = (quote.turnover if quote and quote.turnover else klines[-1].turnover) or 0.0
+    turnover = klines[-1].turnover or 0.0
     obv = _calc_obv(klines)
     # 加密版反推：OBV 方向用 lookback=8（600900 验证：5→上升 8→下降）
     obv_dir = ma_direction(obv, lookback=8)
     obv_trend = "上升" if obv_dir == "向上" else ("下降" if obv_dir == "向下" else "走平")
 
     fund_text, fund_delta = _analyze_fund_flow(flows)
+    if fund_text:
+        fund_text += f"（{flows[-1].source}日级口径）"
     confidence = base
     # 量比修正：<0.5 → -3；0.5~1.5 → +2；1.5~2.0 → +7；≥2.0 → +12
     if volume_ratio < 0.5:

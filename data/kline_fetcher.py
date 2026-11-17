@@ -37,6 +37,7 @@ from urllib3.util import Timeout
 from data.request_runtime import (
     HTTP_ATTEMPT_SECONDS, collect_stages, data_stage, deadline_scope, remaining_seconds, request_id,
 )
+from data.market_time import flow_session_status
 
 log = logging.getLogger("trend_data")
 
@@ -345,10 +346,19 @@ class Kline:
     fetched_at: str = ""
 
 
+def exclude_preopen_bar(klines: List[Kline]) -> List[Kline]:
+    session = flow_session_status()
+    if session["session_state"] == "preopen":
+        return [k for k in klines if k.date < session["market_date"]]
+    return klines
+
+
 def fetch_kline(symbol: str, count: int = 250, period: str = "day", adjust: str = "qfq",
                 enrich: bool = True) -> List[Kline]:
     """首屏和缠论只读取价格；完整分析可独立并行获取补充字段。"""
     klines = _fetch_price_klines(symbol, count, period, adjust)
+    if period == "day":
+        klines = exclude_preopen_bar(klines)
     if not enrich or not klines:
         return klines
     return enrich_klines(klines, fetch_kline_extras(symbol, count, period))
@@ -631,6 +641,29 @@ class Quote:
     volume_unit: str = "手"
     stale: bool = False
     refresh_error: str = ""
+    float_shares: Optional[float] = None
+
+
+def quote_turnover_check(quote: Quote) -> dict:
+    shares = quote.float_shares
+    calculated = quote.volume * 100 / shares * 100 if shares and shares > 0 else None
+    difference = abs(quote.turnover - calculated) if calculated is not None else None
+    return {"float_shares": shares, "calculated_pct": round(calculated, 2) if calculated is not None else None,
+            "status": "unavailable" if calculated is None else
+            "consistent" if difference <= max(0.05, calculated * 0.02) else "mismatch",
+            "formula": "成交量(手) × 100 ÷ 同源流通份额(股/份) × 100%",
+            "source": quote.source}
+
+
+def _validate_quote(quote: Quote) -> None:
+    if not all(math.isfinite(value) and value >= 0
+               for value in (quote.volume, quote.amount, quote.turnover)):
+        raise ValueError("报价成交量、成交额或换手率无效")
+    if quote.volume > 0 and quote.amount > 0 and quote.low > 0 and quote.high > 0:
+        average = quote.amount / (quote.volume * 100)
+        # 容忍源端金额舍入；十倍单位误差或跨品种拼接会落到区间之外。
+        if not quote.low * 0.98 <= average <= quote.high * 1.02:
+            raise ValueError("报价成交量与成交额不一致，成交均价超出当日高低价")
 
 
 @data_stage
@@ -650,6 +683,7 @@ def fetch_quote(symbol: str) -> Optional[Quote]:
                 with deadline_scope(time.monotonic() + QUOTE_SOURCE_BUDGET_SECONDS):
                     quote = fetcher(symbol)
                 if quote and math.isfinite(quote.price) and quote.price > 0:
+                    _validate_quote(quote)
                     if (not quote.name or quote.name == symbol) and previous:
                         quote = replace(quote, name=previous.name)
                     _cache_set(cache_key, quote)
@@ -688,6 +722,7 @@ def _fetch_quote_tencent(symbol: str) -> Optional[Quote]:
         pre_close=number(4), volume=number(6),
         amount=amount if amount is not None else number(37) * 10000,
         turnover=number(38), timestamp=timestamp, fetched_at=utc_now(), source="腾讯",
+        float_shares=_to_float(fields[73]) if len(fields) > 73 else None,
     )
 
 
@@ -695,7 +730,7 @@ def _fetch_quote_eastmoney(symbol: str) -> Optional[Quote]:
     secid = symbol_to_secid(symbol)
     params = {
         "secid": secid,
-        "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170,f168,f86,f124",
+        "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170,f168,f85,f86,f124",
         "fltt": "2",
         "invt": "2",
         "ut": "fa5fd1943c7b386f172d6893dbfba10b",
@@ -704,6 +739,8 @@ def _fetch_quote_eastmoney(symbol: str) -> Optional[Quote]:
     data = _get_json_eastmoney("/api/qt/stock/get", params, QUOTE_HOSTS)
     if data and data.get("data"):
         d = data["data"]
+        if d.get("f57", symbol) != symbol:
+            raise ValueError("报价品种与请求不一致")
         q = Quote(
             symbol=symbol,
             name=d.get("f58", ""),
@@ -719,6 +756,7 @@ def _fetch_quote_eastmoney(symbol: str) -> Optional[Quote]:
             turnover=_to_float(d.get("f168")) or 0,
             timestamp=_quote_timestamp(d.get("f86")) or _quote_timestamp(d.get("f124")),
             fetched_at=utc_now(),
+            float_shares=_to_float(d.get("f85")),
         )
         return q
     return None
@@ -735,6 +773,7 @@ class FundFlow:
     small_net: float
     main_pct: float = 0.0
     fetched_at: str = ""
+    source: str = "东方财富"
 
 
 @data_stage
@@ -815,7 +854,7 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
     if cached is not None:
         return cached
 
-    failures, unavailable = [], []
+    failures, unavailable, candidates = [], [], []
     sources = (
         ("腾讯", _fetch_realtime_flow_tencent, FLOW_PRIMARY_BUDGET_SECONDS),
         ("东方财富", _fetch_realtime_flow_eastmoney, HTTP_ATTEMPT_SECONDS),
@@ -829,13 +868,20 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
                 latest_date = flows[-1].date
                 if latest_date:
                     flows = [flow for flow in flows if flow.date == latest_date]
-                _cache_set(cache_key, flows)
-                return flows
+                candidates.append(flows)
+                if flow_session_status(latest_date)["session_state"] != "awaiting_today":
+                    _cache_set(cache_key, flows)
+                    return flows
+                continue
             unavailable.append(f"{source}未提供该品种的分时资金流记录")
         except (requests.RequestException, OSError, ValueError) as exc:
             reason = _source_error(exc) if isinstance(exc, requests.RequestException) else str(exc)
             failures.append(f"{source}：{reason}")
             log.warning("flow_source_failed symbol=%s source=%s error=%s", symbol, source, exc)
+    if candidates:
+        flows = max(candidates, key=lambda rows: (rows[-1].date, rows[-1].time))
+        _cache_set(cache_key, flows)
+        return flows
     if failures:
         raise OSError("；".join(failures + unavailable))
     _cache_set(cache_key, [])
@@ -873,6 +919,9 @@ def _fetch_realtime_flow_tencent(symbol: str) -> List[MinuteFlow]:
         amounts = {name: _to_float(row.get(field)) for name, field in fields.items()}
         if any(value is None or not math.isfinite(value) for value in amounts.values()):
             raise ValueError("分时资金流金额缺失或无效")
+        if not math.isclose(amounts["main_net"], amounts["super_large_net"] + amounts["large_net"],
+                            rel_tol=1e-5, abs_tol=1):
+            raise ValueError("分时主力净额与超大单、大单之和不一致")
         # 上游字段已是累计净额，单位为元；不再次累加，也不混入东财分项。
         flows.append(MinuteFlow(time=moment.strftime("%H:%M"), date=moment.date().isoformat(),
                                 fetched_at=fetched_at, source="腾讯", **amounts))
@@ -1075,14 +1124,14 @@ def fetch_index_kline(index_code: str = "000001", count: int = 60) -> List[Kline
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
         "klt": "101",
         "fqt": "0",
-        "lmt": str(count),
+        "lmt": str(count + 1),
         "end": "20500101",
     }
 
     data = _get_json_eastmoney("/api/qt/stock/kline/get", params, EM_KLINE_HOSTS)
     if not data or not data.get("data") or not data["data"].get("klines"):
         # 东财失败 → 腾讯尝试
-        klines = _fetch_kline_tencent_index(index_code, count)
+        klines = exclude_preopen_bar(_fetch_kline_tencent_index(index_code, count + 1))[-count:]
         if klines:
             _set_cache(cache_key, klines)
             return klines
@@ -1107,6 +1156,7 @@ def fetch_index_kline(index_code: str = "000001", count: int = 60) -> List[Kline
                 k.pct = round((k.close - klines[-1].close) / klines[-1].close * 100, 2)
             klines.append(k)
 
+    klines = exclude_preopen_bar(klines)[-count:]
     if len(klines) >= 10:
         _set_cache(cache_key, klines)
         return klines
@@ -1161,7 +1211,8 @@ def _fetch_kline_tencent_index(index_code: str, count: int) -> List[Kline]:
 def fetch_market_breadth() -> Optional[dict]:
     """兼容扫描调用；此函数始终只读，不触发网络请求。"""
     from data.market_breadth import market_breadth_cache
-    return market_breadth_cache.snapshot()["data"]
+    snapshot = market_breadth_cache.snapshot()
+    return snapshot["data"] if snapshot["usable_for_scoring"] else None
 
 
 _breadth_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="breadth-page")
@@ -1192,7 +1243,7 @@ def _fetch_breadth_page(page: int) -> dict:
     return data
 
 
-def collect_market_breadth() -> dict:
+def _collect_market_breadth_eastmoney() -> dict:
     """仅后台调用。全部分页成功且完整后才发布新结果。"""
     first_page = _fetch_breadth_page(1)
     total_stocks = int(first_page.get("total", 0))
@@ -1234,7 +1285,71 @@ def collect_market_breadth() -> dict:
         "flat": flat,
         "total": total,
         "breadth_ratio": round(breadth_ratio, 3),
+        "source": "东方财富", "scope": "沪深京A股",
     }
+
+
+SINA_MARKET_API = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center."
+
+
+def _fetch_sina_breadth_count() -> int:
+    total = int(_http_get(SINA_MARKET_API + "getHQNodeStockCount", params={"node": "hs_a"}).json())
+    if not 100 <= total <= 10000:
+        raise ValueError(f"新浪市场宽度总数异常：{total}")
+    return total
+
+
+@data_stage
+def _fetch_sina_breadth_page(page: int) -> list:
+    rows = _http_get(SINA_MARKET_API + "getHQNodeData", params={
+        "node": "hs_a", "num": 100, "page": page, "sort": "symbol", "asc": 1,
+    }).json()
+    if not isinstance(rows, list):
+        raise ValueError(f"新浪市场宽度第{page}页格式无效")
+    return rows
+
+
+def _collect_market_breadth_sina() -> dict:
+    total = _fetch_sina_breadth_count()
+    jobs = {str(page): lambda page=page: _fetch_sina_breadth_page(page)
+            for page in range(1, (total + 99) // 100 + 1)}
+    pages, errors, _ = collect_stages(jobs, required=jobs, budget=15, executor=_breadth_executor)
+    if errors:
+        raise OSError(f"新浪市场宽度分页失败：{errors}")
+    counts = {"up": 0, "down": 0, "flat": 0, "unknown": 0}
+    seen = set()
+    for page, rows in pages.items():
+        if len(rows) != min(100, total - (int(page) - 1) * 100):
+            raise ValueError(f"新浪市场宽度第{page}页不完整")
+        for row in rows:
+            symbol = row.get("symbol")
+            if not symbol or symbol in seen:
+                raise ValueError("新浪市场宽度股票代码缺失或跨页重复")
+            seen.add(symbol)
+            pct = _to_float(row.get("changepercent"))
+            key = "unknown" if pct is None or not math.isfinite(pct) else "up" if pct > 0 else "down" if pct < 0 else "flat"
+            counts[key] += 1
+    if _fetch_sina_breadth_count() != total:
+        raise ValueError("新浪市场宽度采集期间股票总数变化，等待下次完整刷新")
+    moving = counts["up"] + counts["down"]
+    return {**counts, "total": total, "breadth_ratio": round(counts["up"] / moving, 3) if moving else 0.5,
+            "source": "新浪", "scope": "沪深京A股（新浪hs_a股票池）"}
+
+
+def collect_market_breadth() -> dict:
+    """独立供应商回退，每次只发布一个来源的完整股票池。"""
+    failures = []
+    for source, fetcher, budget in (("新浪", _collect_market_breadth_sina, 15),
+                                     ("东方财富", _collect_market_breadth_eastmoney, 15)):
+        try:
+            with deadline_scope(time.monotonic() + budget):
+                result = fetcher()
+            result["source_failures"] = failures
+            return result
+        except (requests.RequestException, OSError, ValueError) as exc:
+            failures.append(f"{source}：{exc}")
+            log.warning("breadth_source_failed source=%s error=%s", source, exc)
+    raise OSError("；".join(failures))
 
 
 def fetch_all_a_shares() -> List[Dict]:

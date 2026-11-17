@@ -1429,7 +1429,7 @@ function renderChanlunDaily(data) {
   const signals = data.signals || [];
   const expired = data.expired_signals || [];
   const zhongshus = data.zhongshus || [];
-  const lastZs = zhongshus.at(-1);
+  const lastZs = data.latest_zhongshu;
   const zsLabel = currentView === 'week' ? '缠论周线' : '缠论日线';
   let html = `<div class="cl-plain-summary"><b>白话总结：</b>${zsLabel}：${escHtml(data.summary || '暂无有效信号')}</div>`;
   html += `<div class="cl-state" style="border-left-color:#7F77DD">${escHtml(data.current_state || '')}</div>`;
@@ -1460,12 +1460,17 @@ function renderChanlunDaily(data) {
     html += `<div style="margin:6px 0;padding:6px 8px;border:1px solid #7f77dd55;border-radius:4px;font-size:12px;color:#aaa">
       最新K线收盘价 <b>${data.current_price.toFixed(3)}</b> ${positionText}；最近中枢 <b>[${lastZs.zd.toFixed(3)} - ${lastZs.zg.toFixed(3)}]</b>
     </div>`;
-    for (const zs of zhongshus.slice(-4)) {
+    for (const zs of zhongshus.filter(z => !z.expired).slice(-4)) {
       const dir = zs.current_position === 'up' ? '收盘在上沿之上' : zs.current_position === 'down' ? '收盘在下沿之下' : '收盘在中枢内';
       html += `<div class="cl-zhongshu ${zs.is_broken ? 'cl-zhongshu-broken' : ''}">
-        ${zs === lastZs ? '[最近] ' : '[历史中枢] '}[${zs.zd.toFixed(3)} - ${zs.zg.toFixed(3)}] ${escHtml(zs.start_date)}~${escHtml(zs.end_date)} ${dir}
+        ${zs.end_date === lastZs.end_date ? '[最近有效] ' : '[历史中枢] '}[${zs.zd.toFixed(3)} - ${zs.zg.toFixed(3)}] ${escHtml(zs.start_date)}~${escHtml(zs.end_date)} ${dir}
       </div>`;
     }
+  }
+  if (!lastZs) html += '<div class="cl-state">暂无有效中枢，等待新的结构形成</div>';
+  if (data.expired_zhongshus?.length) {
+    html += `<details style="font-size:11px;color:#888;margin-top:6px"><summary>已过期中枢（${data.expired_zhongshus.length}）</summary>`;
+    html += data.expired_zhongshus.map(z => `<div>[已过期] [${z.zd.toFixed(3)} - ${z.zg.toFixed(3)}] ${escHtml(z.end_date)}：${escHtml(z.expiry_reason)}</div>`).join('') + '</details>';
   }
   html += `<div class="cl-stats"><span>分型: ${data.fractal_count}</span><span>笔: ${data.stroke_count}</span><span>中枢: ${data.zhongshu_count}</span><span>有效信号: ${signals.length}</span></div>`;
   el.innerHTML = html;
@@ -1486,7 +1491,8 @@ function applyChanlunDailyOverlay(data) {
   if (!klineSeries) return;
 
   // 合并markPoint：原有的买卖点 + 缠论买卖点 + 分型
-  const existingMarkPoints = (klineSeries.markPoint && klineSeries.markPoint.data) || [];
+  const existingMarkPoints = ((klineSeries.markPoint && klineSeries.markPoint.data) || []).filter(p => !p.chanlun);
+  _signalPoints = _signalPoints.filter(p => !p.chanlun);
   const clMarkPoints = [];
 
   // 缠论买卖点标记——买入▲放K线下方，卖出▼放K线上方
@@ -1511,6 +1517,7 @@ function applyChanlunDailyOverlay(data) {
       markerY = isBuy ? candle.low - offset : candle.high + offset;
     }
     clMarkPoints.push({
+      chanlun: true,
       coord: [sigDate, markerY],
       symbol: isBuy ? 'triangle' : 'triangle',
       symbolSize: 18,
@@ -1527,6 +1534,7 @@ function applyChanlunDailyOverlay(data) {
     });
     const sigType = sig.type || (isBuy ? 'buy1' : 'sell1');
     _signalPoints.push({
+      chanlun: true,
       date: sigDate, price: markerY,
       title: sig.label?.formatter ? `缠论·${sig.label.formatter}` : (isBuy ? '缠论买点' : '缠论卖点'),
       formula: `信号价位 ${sigPrice}`,
@@ -1537,6 +1545,7 @@ function applyChanlunDailyOverlay(data) {
   // 分型标记
   for (const f of chartFractals) {
     clMarkPoints.push({
+      chanlun: true,
       coord: f.coord,
       symbol: f.symbol,
       symbolSize: f.symbolSize,
@@ -1553,12 +1562,12 @@ function applyChanlunDailyOverlay(data) {
 
   // 笔的连线用markLine
   const strokeLines = chartStrokes.map(s => ([
-    { coord: s.coords[0] },
+    { coord: s.coords[0], chanlun: true },
     { coord: s.coords[1], lineStyle: s.lineStyle },
   ]));
 
   // 合并markLine：原有的止损/目标价 + 缠论笔
-  const existingMarkLines = (klineSeries.markLine && klineSeries.markLine.data) || [];
+  const existingMarkLines = ((klineSeries.markLine && klineSeries.markLine.data) || []).filter(line => !line[0]?.chanlun);
 
   klineChart.setOption({
     series: [{
@@ -1573,11 +1582,11 @@ function applyChanlunDailyOverlay(data) {
         symbol: 'none',
         data: [...existingMarkLines, ...strokeLines],
       },
-      markArea: markAreas.length ? {
+      markArea: {
         silent: true,
         animation: false,
         data: markAreas,
-      } : undefined,
+      },
     }],
   });
 }
@@ -1739,12 +1748,17 @@ function renderFlow(flows, status = {}) {
   if (_flowMode === 'daily') _renderDailyFlow(flows, status);
 }
 
-function renderFlowDetails(flows) {
+const FLOW_COLUMNS = [
+  ['main_net', '主力'], ['super_large_net', '超大单'], ['large_net', '大单'],
+  ['medium_net', '中单'], ['small_net', '小单'],
+];
+
+function renderFlowDetails(flows, realtime = false) {
   const el = document.getElementById('flow-details');
   if (!flows || !flows.length) { el.textContent = ''; return; }
-  el.innerHTML = `<details><summary>查看逐日数值（${flows.length}条，单位：万元）</summary>
-    <div style="max-height:140px;overflow:auto"><table><thead><tr><th>日期</th><th>主力净流入</th><th>超大单净流入</th></tr></thead>
-    <tbody>${flows.map(f => `<tr><td>${escHtml(f.date)}</td><td>${(f.main_net / 1e4).toFixed(2)}</td><td>${(f.super_large_net / 1e4).toFixed(2)}</td></tr>`).join('')}</tbody></table></div></details>`;
+  el.innerHTML = `<details><summary>查看${realtime ? '分时累计明细' : '逐日数值'}（${flows.length}条，单位：万元）</summary>
+    <div style="max-height:160px;overflow:auto"><table><thead><tr><th>${realtime ? '时间' : '日期'}</th>${FLOW_COLUMNS.map(([, label]) => `<th>${label}净额</th>`).join('')}</tr></thead>
+    <tbody>${flows.map(f => `<tr><td>${escHtml(realtime ? f.time : f.date)}</td>${FLOW_COLUMNS.map(([key]) => `<td>${Number.isFinite(f[key]) ? (f[key] / 1e4).toFixed(2) : '未提供'}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
 }
 
 function showFlowState(title, hint = '') {
@@ -1766,7 +1780,8 @@ function _renderDailyFlow(flows, status = {}) {
   const recent = flows.slice(-5);
   const totalMain = recent.reduce((sum, flow) => sum + flow.main_net, 0);
   const totalMainYi = (totalMain / 1e8).toFixed(2);
-  fs.innerHTML = `最近${recent.length}个资金流交易日主力合计 <span style="color:${totalMain >= 0 ? C.up : C.down};font-weight:bold">${totalMain >= 0 ? '+' : ''}${totalMainYi}亿</span>（${escHtml(recent[0].date)}~${escHtml(recent.at(-1).date)}）`;
+  const latest = flows.at(-1);
+  fs.innerHTML = `最近${recent.length}个资金流交易日主力合计 <span style="color:${totalMain >= 0 ? C.up : C.down};font-weight:bold">${totalMain >= 0 ? '+' : ''}${totalMainYi}亿</span>（${escHtml(recent[0].date)}~${escHtml(latest.date)}）<br>${escHtml(latest.date)} 单日主力净额 ${(latest.main_net / 1e8).toFixed(2)}亿 · ${escHtml(status.source || latest.source || '东方财富')}`;
   const lastDate = status.data_through || flows.at(-1).date;
   const reference = status.reference_date || _klineData.at(-1)?.date;
   const lagging = reference && lastDate < reference;
@@ -1804,9 +1819,11 @@ function switchFlowMode(mode) {
   flowChart.clear();
   for (const id of ['flow-summary', 'flow-meta', 'flow-details']) document.getElementById(id).textContent = '';
   if (mode === 'realtime') {
+    showFlowState('正在获取分时资金流…');
     loadRealtimeFlow(currentSymbol, true);
   } else {
     _renderDailyFlow(_dailyFlows, _dailyFlowStatus);
+    if (!_dailyFlows?.length) loadHistoricalFlow(currentSymbol);
   }
 }
 
@@ -1883,29 +1900,29 @@ function renderRealtimeFlow(data) {
   const nextTime = new Date(Date.now() + retrySeconds * 1000).toLocaleTimeString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
   if (data.error || !data.flows?.length) {
     fs.textContent = data.status === 'unavailable' ? '分时资金流暂无记录' : '分时资金流获取失败';
-    document.getElementById('flow-meta').textContent = `${data.message || data.error || '数据源未提供记录'}；本次检查 ${formatDataTime(data.checked_at)}；下次自动尝试 ${nextTime}（北京时间）`;
+    document.getElementById('flow-meta').textContent = `${data.session_note ? data.session_note + '；' : ''}${data.message || data.error || '数据源未提供记录'}；本次检查 ${formatDataTime(data.checked_at)}；下次自动尝试 ${nextTime}（北京时间）`;
     showFlowState(fs.textContent, '可点击“重新获取”，或切换“近30日”查看历史数据');
     return;
   }
   const summary = data.summary || {};
-  const mainNetYi = (summary.main_net / 1e8).toFixed(2);
-  const superLargeYi = (summary.super_large_net / 1e8).toFixed(2);
-  fs.innerHTML = `${data.stale ? '[旧数据] ' : ''}${escHtml(data.data_date || '数据日期未提供')}主力累计 <span style="color:${summary.main_net >= 0 ? C.up : C.down};font-weight:bold">${summary.main_net >= 0 ? '+' : ''}${mainNetYi}亿</span> | 超大单 <span style="color:${summary.super_large_net >= 0 ? C.up : C.down};font-weight:bold">${summary.super_large_net >= 0 ? '+' : ''}${superLargeYi}亿</span>`;
+  fs.innerHTML = `${data.stale ? '[刷新失败，旧数据] ' : ''}${escHtml(data.data_date || '数据日期未提供')} ${data.is_today ? '今日单日累计' : '该交易日累计'}<br>` + FLOW_COLUMNS.map(([key, label]) => `${label} <span style="color:${summary[key] >= 0 ? C.up : C.down};font-weight:bold">${Number.isFinite(summary[key]) ? (summary[key] >= 0 ? '+' : '') + (summary[key] / 1e8).toFixed(2) + '亿' : '未提供'}</span>`).join(' | ');
+  renderFlowDetails(data.flows, true);
   const referenceDate = _klineData.at(-1)?.date;
   const behind = data.data_date && referenceDate && data.data_date < referenceDate;
-  document.getElementById('flow-meta').textContent = `数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '来源未提供'}${data.source_note ? '；' + data.source_note : ''}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}`;
+  document.getElementById('flow-meta').textContent = `${data.session_note ? data.session_note + '；' : ''}数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '来源未提供'}${data.source_note ? '；' + data.source_note : ''}；${data.accounting_note || '主力净额 = 超大单净额 + 大单净额'}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}；下次自动刷新 ${nextTime}`;
   const flows = data.flows;
   const mainNet = flows.map(f => +(f.main_net / 1e8).toFixed(4));
-  const superLarge = flows.map(f => +(f.super_large_net / 1e8).toFixed(4));
   flowChart.setOption({
     backgroundColor: C.bg, animation: false,
-    legend: {data: ['主力净流入(累计)', '超大单(累计)'], textStyle: {color: C.textDim, fontSize: 10}, top: 2, itemWidth: 12, itemHeight: 8},
+    legend: {data: FLOW_COLUMNS.map(([, label]) => label + '净流入(累计)'), textStyle: {color: C.textDim, fontSize: 10}, top: 2, itemWidth: 12, itemHeight: 8},
     xAxis: {type: 'category', data: flows.map(f => f.time), axisLabel: {color: C.textDim, fontSize: 9, interval: 29}, axisLine: {lineStyle: {color: C.axis}}},
     yAxis: {type: 'value', axisLabel: {color: C.textDim, fontSize: 9}, splitLine: {lineStyle: {color: C.grid}}},
     grid: {left: 50, right: 20, top: 22, bottom: 18},
     series: [
       {name: '主力净流入(累计)', type: 'bar', data: mainNet.map(value => ({value, itemStyle: {color: value >= 0 ? C.up + '88' : C.down + '88'}}))},
-      {name: '超大单(累计)', type: 'line', data: superLarge, symbol: 'none', lineStyle: {color: C.ma20, width: 1}},
+      ...FLOW_COLUMNS.slice(1).map(([key, label], i) => ({name: label + '净流入(累计)', type: 'line',
+        data: flows.map(f => Number.isFinite(f[key]) ? +(f[key] / 1e8).toFixed(4) : null), symbol: 'none',
+        lineStyle: {color: [C.ma20, '#a78bfa', '#38bdf8', '#eab308'][i], width: 1}})),
     ],
     tooltip: {trigger: 'axis', formatter: items => items.length ? `${escHtml(data.data_date || '')} ${escHtml(items[0].axisValue)}<br>` + items.map(item => `${item.seriesName}: ${item.value >= 0 ? '+' : ''}${item.value.toFixed(4)}亿`).join('<br>') : ''},
   }, true);
@@ -2070,6 +2087,10 @@ function renderTradePlan(signal) {
 function renderSignal(signal) {
   // 一句话总结
   renderSummary(signal);
+  if (signal.input_snapshot) {
+    const input = signal.input_snapshot;
+    document.getElementById('sum-body').insertAdjacentHTML('beforeend', `<div style="font-size:11px;color:#888;margin-top:6px">${input.status === 'provisional' ? '暂定评分（部分输入缺失）' : '评分输入'}：K线截至 ${escHtml(input.kline_through)}，日级资金流截至 ${escHtml(input.flow_through || '缺失')}。${escHtml(input.basis)}</div>`);
+  }
 
   // 操作计划
   renderTradePlan(signal);
@@ -2224,7 +2245,7 @@ function renderMarket(signal, breadth, status = {}) {
     const br = breadth.breadth_ratio ?? 0.5;
     const brPct = (br * 100).toFixed(0);
     const brColor = br >= 0.6 ? C.up : br >= 0.4 ? '#ffc107' : C.down;
-    const brLabel = br >= 0.7 ? '普涨' : br >= 0.6 ? '多数上涨' : br >= 0.4 ? '多数下跌' : '普跌';
+    const brLabel = upN + downN === 0 ? '暂无涨跌记录' : br >= 0.7 ? '普涨' : br >= 0.6 ? '多数上涨' : br >= 0.5 ? '涨跌接近' : br >= 0.4 ? '多数下跌' : '普跌';
     breadthHtml = `<div style="margin-top:6px;padding:6px 8px;background:rgba(255,255,255,0.05);border-radius:6px">
       <div style="display:flex;align-items:center;gap:8px;font-size:12px">
         <span style="color:${C.up};font-weight:bold">${upN}</span>
@@ -2238,7 +2259,7 @@ function renderMarket(signal, breadth, status = {}) {
   }
   const updatedAt = status.updated_at ? formatDataTime(status.updated_at) : '';
   const freshness = updatedAt
-    ? `宽度更新时间：${updatedAt}${status.stale ? '（旧数据）' : ''}${status.last_error ? '，最近刷新失败' : ''}`
+    ? `宽度更新时间：${updatedAt}${status.stale ? (status.usable_for_scoring ? '（最近成功缓存，仍用于评分）' : '（旧数据，仅展示）') : ''}${status.last_error ? '，最近刷新失败' : ''} · ${breadth?.source || '来源未知'} ${breadth?.scope || ''}`
     : (status.refreshing ? '市场宽度暂无成功快照，正在刷新' :
        status.last_error ? '市场宽度刷新失败，暂无成功快照' : '市场宽度暂无成功快照');
   breadthHtml += `<div style="margin-top:6px;color:${status.stale ? '#ffc107' : '#888'}">${escHtml(freshness)}</div>`;
@@ -2334,12 +2355,17 @@ function updateQuote(q, stale = false) {
   if (!stale) rememberQuote(q);
   const cls = q.pct > 0 ? 'up' : q.pct < 0 ? 'down' : 'flat';
   const sign = q.pct > 0 ? '+' : '';
-  const turnoverTip = `${q.turnover_source || '数据源提供的换手率'}。换手率可以超过100%，需结合品种交易机制和流通份额核实。`;
+  const check = q.turnover_check || {};
+  const auditText = check.calculated_pct != null
+    ? `同源流通份额 ${(check.float_shares / 1e8).toFixed(4)}亿；按量核算 ${check.calculated_pct.toFixed(2)}%（${check.status === 'consistent' ? '与源值一致' : '与源值不一致，待核实'}）`
+    : '数据源未提供流通份额，无法核算分母';
+  const turnoverTip = `${q.turnover_source || '数据源提供的换手率'}。${check.formula || ''}；${auditText}。成交量和换手率来自同一份报价。`;
   el.innerHTML = `
     <span class="qb-name">${escHtml(_currentStockName)}</span>
     <span class="qb-price ${cls}">${q.price.toFixed(3)}</span>
     <span class="qb-pct ${cls}">${sign}${q.pct.toFixed(2)}%</span>
-    <span class="qb-meta" title="${escHtml(turnoverTip)}">量${fmtVol(q.volume)}${escHtml(q.volume_unit || '手')} 换手${q.turnover.toFixed(1)}%（源值）</span>
+    <span class="qb-meta" title="${escHtml(turnoverTip)}">量${fmtVol(q.volume)}${escHtml(q.volume_unit || '手')} 换手${q.turnover.toFixed(2)}%（源值）${check.status === 'mismatch' ? ' ⚠分母待核实' : ''}</span>
+    ${q.turnover > 100 || check.status === 'mismatch' ? `<span class="qb-timing">${escHtml(auditText)}；换手率是累计成交份额/流通份额，并非不同持有人占比</span>` : ''}
     <span class="qb-timing" style="color:${stale ? '#ffc107' : '#888'}">${stale ? '旧数据 · ' : ''}报价时间 ${formatDataTime(q.timestamp)}；最后成功获取 ${formatDataTime(q.fetched_at)}（北京时间） · ${escHtml(q.source || '数据源未知')}</span>
   `;
 }
@@ -2351,6 +2377,7 @@ function acceptQuote(q) {
   } else {
     setStageStatus('quote', '报价', `已更新（${q.source || '行情源'}）`);
   }
+  if (_loadSession?.analysisData) renderAnalysisStatus(_loadSession);
 }
 
 function markQuoteFailure(error) {
@@ -2439,6 +2466,25 @@ function setStageStatus(stage, label, state, error = false) {
   el.style.color = error ? '#ffc107' : '#999';
 }
 
+const ANALYSIS_REFRESH_MS = 30000;
+
+function clearAnalysisPanels() {
+  document.getElementById('sum-body').textContent = '分析加载中…';
+  for (const id of ['risk-list', 'market-body', 'module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid']) {
+    document.getElementById(id).textContent = '';
+  }
+  for (const id of ['plan-card', 'market-card', 'risk-card']) document.getElementById(id).style.display = 'none';
+}
+
+function renderAnalysisStatus(session) {
+  const data = session.analysisData;
+  if (!data || session.analysisRefreshing) return;
+  const labels = {quote: '报价', fund_flow: '日级资金流', index: '大盘指数', kline_extras: '成交额/换手率', breadth: '市场宽度'};
+  const errors = Object.entries(data.degraded || {}).filter(([stage]) => stage !== 'quote' || !session.quoteReady);
+  const note = errors.map(([stage, reason]) => `${labels[stage] || stage}：${reason}`).join('；');
+  setStageStatus('analysis', '分析', `已完成 ${formatDataTime(data.analyzed_at)}${note ? '（本次数据降级） ' + note : ''}`, !!note);
+}
+
 async function analyze(symbol) {
   stopFlowRequests();
   if (_loadSession) _loadSession.cancel();
@@ -2460,6 +2506,7 @@ async function analyze(symbol) {
   _lastSignalData = null;
   _currentStockName = '';
   _lastQuote = readQuoteSnapshot(symbol);
+  clearAnalysisPanels();
   for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) chart.clear();
   for (const id of ['module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid', 'sa-stats', 'sa-detail', 'flow-summary', 'flow-meta', 'flow-details']) {
     document.getElementById(id).textContent = '';
@@ -2505,60 +2552,72 @@ async function analyze(symbol) {
     if (!chartReady) setStageStatus('kline', 'K 线', error.message, true);
   });
 
-  session.run('analysis', `${API}/api/analyze?${query}`, data => {
-    analysisData = data;
-    if (!session.quoteReady && data.quote) {
-      acceptQuote(data.quote);
-      session.quoteReady = !data.quote.stale;
-    }
-    renderKline(data.klines, data.signal);
-    chartReady = true;
-    if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
-    updateKlineStatus(data.kline_status);
-    renderFlow(data.flows, data.flow_status);
-    renderSignal(data.signal);
-    renderCanslim(data.signal.canslim);
-    renderKeyLevels(data.signal.key_levels);
-    renderMarket(data.signal, data.breadth, data.breadth_status);
-    const degraded = Object.keys(data.degraded || {}).length > 0;
-    setStageStatus('analysis', '分析', `${degraded ? '已完成（部分数据降级）' : '已完成'} ${formatDataTime(data.analyzed_at)}`, degraded);
+  session.refreshAnalysis = () => {
+    if (!session.active || session.analysisRefreshing) return;
+    session.analysisRefreshing = true;
+    session.analysisStarted = Date.now();
+    clearAnalysisPanels();
+    setStageStatus('analysis', '分析', '加载中');
+    return session.run('analysis', `${API}/api/analyze?${query}`, data => {
+      analysisData = data;
+      session.analysisData = data;
+      if (!session.quoteReady && data.quote) {
+        acceptQuote(data.quote);
+        session.quoteReady = !data.quote.stale;
+      }
+      renderKline(data.klines, data.signal);
+      chartReady = true;
+      if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
+      updateKlineStatus(data.kline_status);
+      renderFlow(data.flows, data.flow_status);
+      renderSignal(data.signal);
+      renderCanslim(data.signal.canslim);
+      renderKeyLevels(data.signal.key_levels);
+      renderMarket(data.signal, data.breadth, data.breadth_status);
 
-    // 记录历史 & 更新自选星标
-    const _sName = knownStockName(symbol, data.quote && data.quote.name);
-    const _sAction = data.signal ? data.signal.action : '';
-    const _sScore = data.signal ? data.signal.score : 0;
-    const _sPrice = data.quote && !data.quote.stale ? data.quote.price : 0;
-    addHistory(symbol, _sName, _sAction, _sScore);
-    updateStarButton(symbol);
+      // 记录历史 & 更新自选星标
+      const _sName = knownStockName(symbol, data.quote && data.quote.name);
+      const _sAction = data.signal ? data.signal.action : '';
+      const _sScore = data.signal ? data.signal.score : 0;
+      const _sPrice = data.quote && !data.quote.stale ? data.quote.price : 0;
+      addHistory(symbol, _sName, _sAction, _sScore);
+      updateStarButton(symbol);
 
-    // 更新自选股中的action/score（用于多股一览显示）
-    const _wl = getWatchlist();
-    const _wi = _wl.findIndex(s => s.code === symbol);
-    if (_wi >= 0) {
-      _wl[_wi].action = _sAction;
-      _wl[_wi].score = _sScore;
-      _wl[_wi].name = _sName;
-      saveWatchlist(_wl);
-    }
+      // 更新自选股中的action/score（用于多股一览显示）
+      const _wl = getWatchlist();
+      const _wi = _wl.findIndex(s => s.code === symbol);
+      if (_wi >= 0) {
+        _wl[_wi].action = _sAction;
+        _wl[_wi].score = _sScore;
+        _wl[_wi].name = _sName;
+        saveWatchlist(_wl);
+      }
 
-    // 信号变更检测 & Toast提醒
-    checkSignalChange(symbol, _sName, _sAction, _sScore, _sPrice);
+      // 信号变更检测 & Toast提醒
+      checkSignalChange(symbol, _sName, _sAction, _sScore, _sPrice);
 
-    // 记录信号到localStorage（用于准确率统计）
-    if (_sAction && _sPrice > 0) {
-      recordSignal(symbol, _sName, _sAction, _sScore, _sPrice);
-    }
+      // 记录信号到localStorage（用于准确率统计）
+      if (_sAction && _sPrice > 0 && session.recordedInput !== data.signal.input_snapshot?.id) {
+        recordSignal(symbol, _sName, _sAction, _sScore, _sPrice);
+        session.recordedInput = data.signal.input_snapshot?.id;
+      }
 
-    // 渲染信号准确率统计
-    renderSignalAccuracy(symbol);
+      // 渲染信号准确率统计
+      renderSignalAccuracy(symbol);
 
-  }, error => {
-    setStageStatus('analysis', '分析', '暂不可用', true);
-    document.getElementById('sum-body').textContent = `分析失败：${error.message}`;
-    if (_flowMode === 'daily') document.getElementById('flow-summary').textContent = '日级资金流暂不可用，可点击重新获取';
-  });
+    }, error => {
+      session.analysisData = null;
+      setStageStatus('analysis', '分析', '暂不可用', true);
+      document.getElementById('sum-body').textContent = `分析失败：${error.message}`;
+      if (_flowMode === 'daily') document.getElementById('flow-summary').textContent = '日级资金流暂不可用，可点击重新获取';
+    }).finally(() => {
+      session.analysisRefreshing = false;
+      if (session.active) renderAnalysisStatus(session);
+    });
+  };
+  session.refreshAnalysis();
 
-  session.run('chanlun', `${API}/api/chanlun_daily?${query}&count=250`, data => {
+  session.refreshChanlun = () => session.run('chanlun', `${API}/api/chanlun_daily?${query}&count=250`, data => {
     _dailyChanlun = data;
     if (currentView !== 'minute') renderChanlunDaily(data);
     if (chartReady) applyChanlunDailyOverlay(data);
@@ -2567,6 +2626,7 @@ async function analyze(symbol) {
     setStageStatus('chanlun', '缠论', '暂不可用', true);
     document.getElementById('chanlun-daily-body').textContent = `缠论分析失败：${error.message}`;
   });
+  session.refreshChanlun();
 
   if (_flowMode === 'realtime') loadRealtimeFlow(symbol);
   if (currentView === 'minute') loadMinute(symbol);
@@ -2580,8 +2640,8 @@ async function refreshQuote(symbol) {
   try {
     const q = await session.request(`${API}/api/quote?symbol=${encodeURIComponent(symbol)}`);
     if (session.active) {
-      acceptQuote(q);
       session.quoteReady = !q.stale;
+      acceptQuote(q);
       // K线最后一根蜡烛跟随实时行情更新
       refreshKlineLastCandle(q);
       if (currentView === 'minute') {
@@ -2596,6 +2656,10 @@ async function refreshQuote(symbol) {
     }
   } finally {
     session.quoteRefreshing = false;
+    if (session.active && Date.now() - session.analysisStarted >= ANALYSIS_REFRESH_MS && !session.analysisRefreshing) {
+      session.refreshAnalysis();
+      session.refreshChanlun();
+    }
   }
 }
 

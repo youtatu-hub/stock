@@ -7,6 +7,7 @@ import threading
 import time
 
 from data.kline_fetcher import utc_now
+from data.market_time import flow_session_status
 from data.request_runtime import collect_stages, data_stage
 
 FLOW_BUDGET_SECONDS = 8.0
@@ -20,7 +21,7 @@ def history_status(flows, klines=(), period="day") -> dict:
     latest = max(flows, key=lambda item: item.date) if flows else None
     reference = klines[-1].date if klines else None
     return {
-        "source": "东方财富", "available": bool(flows),
+        "source": latest.source if latest else "东方财富", "available": bool(flows),
         "data_through": latest.date if latest else None,
         "fetched_at": latest.fetched_at if latest else None,
         "reference_date": reference,
@@ -34,7 +35,8 @@ def history_status(flows, klines=(), period="day") -> dict:
 def serialize_history(flows) -> list:
     return [{"date": flow.date, "main_net": flow.main_net,
              "super_large_net": flow.super_large_net, "large_net": flow.large_net,
-             "main_pct": flow.main_pct} for flow in flows]
+             "medium_net": flow.medium_net, "small_net": flow.small_net,
+             "source": flow.source, "main_pct": flow.main_pct} for flow in flows]
 
 
 class RealtimeFlowService:
@@ -49,7 +51,7 @@ class RealtimeFlowService:
         with self._lock:
             previous = self._states.get(symbol)
             if previous and not force and now < previous["next_attempt"]:
-                return {**previous["payload"], "retry_after_seconds":
+                return {**previous["payload"], **flow_session_status(previous["payload"].get("data_date")), "retry_after_seconds":
                         max(1, math.ceil(previous["next_attempt"] - now))}
         values, errors, _ = collect_stages(
             {"realtime_flow": lambda: {"flows": fetcher(symbol)}},
@@ -67,6 +69,7 @@ class RealtimeFlowService:
                 "symbol": symbol, "status": "ok", "stale": False,
                 "source": last.source, "checked_at": checked_at,
                 "source_note": f"按{last.source}口径统计，不同来源的资金流金额可能有差异",
+                "accounting_note": "主力净额 = 超大单净额 + 大单净额；各分项可一进一出，不能只比较主力与超大单",
                 "fetched_at": last.fetched_at or checked_at,
                 "data_date": last.date or None,
                 "as_of": f"{last.date} {last.time}".strip(),
@@ -91,6 +94,7 @@ class RealtimeFlowService:
                 payload = {"symbol": symbol, "status": "error" if message else "unavailable",
                            "flows": [], "source": "腾讯 / 东方财富", "message": reason,
                            "checked_at": checked_at, "fetched_at": None, "as_of": None}
+        payload.update(flow_session_status(payload.get("data_date")))
         payload["retry_after_seconds"] = retry_seconds
         with self._lock:
             if len(self._states) >= 512 and symbol not in self._states:

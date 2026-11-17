@@ -133,6 +133,7 @@ class TencentFlowTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(fetcher, "_cache_get", return_value=None))
         self.enterContext(patch.object(fetcher, "_cache_set"))
+        self.enterContext(patch.object(fetcher, "flow_session_status", return_value={"session_state": "preopen"}))
 
     @staticmethod
     def payload():

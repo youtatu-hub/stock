@@ -152,9 +152,13 @@ def _build_trade_plan(
         key=lambda p: priority_map.get(p.name, 9),
     )
     target = next((p.target_price for p in ordered if p.target_price > entry), None)
+    cup = canslim.cup_handle or {}
+    if target is None and cup.get("breakout") and cup.get("buy_point", float("inf")) <= entry:
+        if cup.get("target", 0) > entry:
+            target = cup["target"]
     if target is None:
         for p in patterns:
-            if "箱体上沿" in p.key_levels:
+            if p.key_levels.get("箱体上沿", 0) > entry:
                 target = p.key_levels["箱体上沿"]
                 break
     if target is None:
@@ -258,20 +262,14 @@ def run_analysis(
     quote: Optional[Quote] = None,
     flows: Optional[List[FundFlow]] = None,
     index_klines: Optional[List[Kline]] = None,
+    breadth: Optional[dict] = None,
 ) -> SignalEngineResult:
     """五模块综合分析入口。"""
-    # 与加密版一致：未显式提供大盘指数时，内部获取上证指数（失败则回退个股均线）
-    if index_klines is None:
-        try:
-            from data.kline_fetcher import fetch_index_kline
-            index_klines = fetch_index_kline("000001", 60)
-        except Exception:
-            index_klines = None
     trend = analyze_trend(klines)
     patterns = analyze_patterns(klines)
     vp = analyze_volume_price(klines, quote, flows)
     breakouts = analyze_breakout(klines)
-    canslim = analyze_canslim(klines, quote, flows, index_klines)
+    canslim = analyze_canslim(klines, quote, flows, index_klines, breadth)
 
     trend_score = _trend_to_score(trend)
     pattern_score = _pattern_to_score(patterns)

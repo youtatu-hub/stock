@@ -12,6 +12,7 @@ API：
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import os
 import logging
@@ -29,7 +30,7 @@ sys.path.insert(0, ROOT)
 from data.kline_fetcher import (
     fetch_kline, fetch_quote, fetch_fund_flow, search_stock, fetch_minute,
     fetch_realtime_flow, fetch_all_a_shares, fetch_index_kline, fetch_market_breadth,
-    fetch_kline_extras, enrich_klines,
+    fetch_kline_extras, enrich_klines, quote_turnover_check,
     Kline, Quote, FundFlow, MinuteData, MinuteFlow, utc_now
 )
 from data.market_breadth import market_breadth_cache
@@ -91,6 +92,8 @@ def quote_to_dict(q: Quote) -> dict:
         "timestamp": q.timestamp, "fetched_at": q.fetched_at,
         "source": q.source, "volume_unit": q.volume_unit,
         "turnover_source": f"{q.source}提供的换手率，按数据源原值展示",
+        "turnover_check": quote_turnover_check(q),
+        "volume_source": q.source, "amount_source": q.source,
         "stale": q.stale, "refresh_error": q.refresh_error,
     }
 
@@ -197,6 +200,27 @@ def _kline_status(klines: list, period: str) -> dict:
             "fetched_at": last.fetched_at if last else None, "period": period}
 
 
+def _analysis_inputs(klines, flows, index_klines, breadth, degraded):
+    # 仅包含评分实际使用的数值；网络获取时间和独立报价不改变输入标识。
+    inputs = {
+        "klines": [(k.date, k.open, k.close, k.high, k.low, k.volume) for k in klines],
+        "flows": [(f.date, f.main_net) for f in flows],
+        "index": [(k.date, k.close) for k in index_klines or []],
+        "breadth": {key: breadth.get(key) for key in ("total", "up", "down", "breadth_ratio")} if breadth else None,
+    }
+    fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:12]
+    missing = []
+    if not flows or "fund_flow" in degraded:
+        missing.append("fund_flow")
+    if len(index_klines or []) < 60 or "index" in degraded:
+        missing.append("index")
+    return {"id": fingerprint, "status": "provisional" if missing else "complete",
+            "missing": missing, "kline_through": klines[-1].date,
+            "flow_through": flows[-1].date if flows else None,
+            "index_through": index_klines[-1].date if index_klines else None,
+            "basis": "价格、成交量使用同一K线快照；相同输入得到相同评分，盘中K线或资金流变化会重算"}
+
+
 def handle_analyze(params: dict) -> dict:
     started = time.monotonic()
     symbol = params.get("symbol", [""])[0].strip()
@@ -221,7 +245,8 @@ def handle_analyze(params: dict) -> dict:
     quote = data.get("quote")
     if quote and quote.stale:
         degraded["quote"] = f"实时报价刷新失败，显示最近成功报价（{quote.fetched_at}）"
-    flows = data.get("fund_flow", [])
+    flows = sorted((flow for flow in data.get("fund_flow", []) if flow.date <= klines[-1].date),
+                   key=lambda flow: flow.date)
     flow_status = history_status(flows, klines, period)
     if flow_status["lagging"]:
         degraded["fund_flow"] = (f"日级资金流仅截至{flow_status['data_through']}，"
@@ -233,54 +258,16 @@ def handle_analyze(params: dict) -> dict:
     timings["breadth_cache"] = round((time.monotonic() - breadth_started) * 1000, 1)
     if breadth_snapshot["stale"]:
         degraded["breadth"] = ("市场宽度使用最近成功缓存" if breadth else "市场宽度尚未就绪")
+    scoring_breadth = breadth if breadth_snapshot["usable_for_scoring"] else None
 
     # 运行分析
     analysis_started = time.monotonic()
-    result = run_analysis(klines, None if quote and quote.stale else quote, flows, index_klines)
-
-    # 后处理：用市场宽度修正M评分（加密模块无法内部修改，在此修正）
+    result = run_analysis(klines, None if quote and quote.stale else quote, flows, index_klines, scoring_breadth)
     signal_data = signal_to_dict(result)
-    if breadth and signal_data.get("canslim") and breadth.get("total", 0) >= 50:
-        br = breadth.get("breadth_ratio", 0.5)
-        up_n = breadth.get("up", 0)
-        down_n = breadth.get("down", 0)
-        pct_str = f"{br * 100:.0f}%"
-        old_m = signal_data["canslim"]["m_score"]
-        if br >= 0.7:
-            bonus = 15
-            br_label = "广度强"
-        elif br >= 0.6:
-            bonus = 10
-            br_label = "偏多"
-        elif br >= 0.5:
-            bonus = 5
-            br_label = "中性"
-        elif br >= 0.4:
-            bonus = -5
-            br_label = "偏空"
-        elif br >= 0.3:
-            bonus = -10
-            br_label = "广度弱"
-        else:
-            bonus = -15
-            br_label = "普跌"
-        new_m = max(0, min(100, old_m + bonus))
-        signal_data["canslim"]["m_score"] = new_m
-        br_signal = f"市场宽度{up_n}涨/{down_n}跌，{pct_str}个股上涨({br_label})"
-        if breadth_snapshot["stale"]:
-            br_signal += f"，缓存时间{breadth_snapshot['updated_at']}"
-        if signal_data["canslim"].get("signals"):
-            signal_data["canslim"]["signals"] = list(signal_data["canslim"]["signals"]) + [br_signal]
-        if signal_data["canslim"].get("description"):
-            signal_data["canslim"]["description"] = signal_data["canslim"]["description"] + f"；{br_signal}"
 
     # ---- 信号引擎优化：硬否决/软否决/分级体系/仓位管理/盈亏比 ----
     signal_data = _apply_signal_optimization(signal_data, klines, quote)
-    if degraded:
-        stage_labels = {"quote": "报价", "fund_flow": "资金流", "index": "大盘指数",
-                        "kline_extras": "成交额/换手率", "breadth": "市场宽度"}
-        signal_data["risk_warnings"].append("部分数据降级：" + "；".join(
-            f"{stage_labels.get(stage, stage)}：{reason}" for stage, reason in degraded.items()))
+    signal_data["input_snapshot"] = _analysis_inputs(klines, flows, index_klines, scoring_breadth, degraded)
 
     # 构建大盘环境摘要
     market_env = ""
@@ -459,26 +446,8 @@ def _scan_one_stock(symbol: str, period: str, index_klines, breadth) -> dict:
             return None
         flows = fetch_fund_flow(symbol, days=30)
 
-        result = run_analysis(klines, quote, flows, index_klines)
+        result = run_analysis(klines, quote, flows, index_klines, breadth)
         signal_data = signal_to_dict(result)
-
-        # M评分修正（与handle_analyze一致）
-        if breadth and signal_data.get("canslim") and breadth.get("total", 0) >= 50:
-            br = breadth.get("breadth_ratio", 0.5)
-            old_m = signal_data["canslim"]["m_score"]
-            if br >= 0.7:
-                bonus = 15
-            elif br >= 0.6:
-                bonus = 10
-            elif br >= 0.5:
-                bonus = 5
-            elif br >= 0.4:
-                bonus = -5
-            elif br >= 0.3:
-                bonus = -10
-            else:
-                bonus = -15
-            signal_data["canslim"]["m_score"] = max(0, min(100, old_m + bonus))
 
         # 信号引擎优化后处理
         signal_data = _apply_signal_optimization(signal_data, klines, quote)
@@ -750,7 +719,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if path == "/api/health":
                     self._json({"status": "ok", "time": time.strftime("%H:%M:%S"),
-                                "flow_api_version": 4, "flow_sources": ["腾讯", "东方财富"]})
+                                "flow_api_version": 5, "flow_sources": ["腾讯", "东方财富"],
+                                "breadth_sources": ["新浪", "东方财富"]})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))
                 elif path == "/api/market_breadth":

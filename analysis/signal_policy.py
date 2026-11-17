@@ -6,6 +6,8 @@ import math
 
 log = logging.getLogger("trend_app")
 BUY_ACTIONS = ("买入", "强烈买入", "谨慎买入")
+STRONG_TREND_SCORE = 80
+STRONG_NEW_HIGH_SCORE = 80
 HARD_VETO = (
     ("跌破MA20", "价格跌破MA20，趋势已坏"),
     ("价跌量增", "价跌量增，恐慌抛售信号"),
@@ -37,7 +39,13 @@ def apply_signal_optimization(signal_data: dict, klines: list, quote) -> dict:
             stock_signals.append(text)
     stock_signals.append(vp.get("pattern", ""))
     signal_text = " ".join(stock_signals).replace(" ", "")
-    hard_reason = next((reason for key, reason in HARD_VETO if key in signal_text), None)
+    strong_new_high = (len(klines) >= 60 and trend.get("strength", 0) >= STRONG_TREND_SCORE
+                       and (signal_data.get("canslim") or {}).get("n_score", 0) >= STRONG_NEW_HIGH_SCORE
+                       and klines[-1].close >= max(k.high for k in klines[-251:-1])
+                       and vp.get("volume_ratio", 0) >= 1)
+    obv_warning = any(key in signal_text for key, _ in HARD_VETO if key.startswith("OBV"))
+    hard_reason = next((reason for key, reason in HARD_VETO if key in signal_text
+                        and not (strong_new_high and key.startswith("OBV"))), None)
     soft_reason = next((reason for key, reason in SOFT_VETO if key in signal_text), None)
     modules_above_55 = sum(module_scores.get(key, 50) >= 55
                            for key in ("趋势", "CAN_SLIM", "突破", "量价", "形态"))
@@ -58,6 +66,9 @@ def apply_signal_optimization(signal_data: dict, klines: list, quote) -> dict:
             if soft_reason and action in ("强烈买入", "买入"):
                 action = {"强烈买入": "买入", "买入": "谨慎买入"}[action]
                 reasons.append(f"软否决：{soft_reason}")
+            if strong_new_high and obv_warning and action in BUY_ACTIONS:
+                action = "谨慎买入"
+                reasons.append("强势新高且量能不缩：OBV下降作为背离风险，限制轻仓，不单独否决")
 
     # 用实际展示价重新计算，不能相信过时或舍入后的比值，也不能跳过零收益。
     entry, stop, target = (plan.get(key) or 0 for key in ("entry_price", "stop_loss", "target_price"))
@@ -85,7 +96,11 @@ def apply_signal_optimization(signal_data: dict, klines: list, quote) -> dict:
 
     # 先完成所有否决，再产生唯一的最终仓位和计划。
     if action in BUY_ACTIONS:
-        if m_score < 40:
+        if strong_new_high and obv_warning:
+            position = "轻仓(1/4) — 新高与OBV背离，严格控制仓位"
+            if m_score < 40:
+                reasons.append(f"大盘M分{m_score}偏低，保持轻仓")
+        elif m_score < 40:
             action = {"强烈买入": "买入", "买入": "谨慎买入"}.get(action, action)
             position = "轻仓(1/4) — 大盘偏空，严格控制仓位"
             reasons.append(f"大盘M分{m_score}偏低，限制评级和仓位")
@@ -128,6 +143,7 @@ def apply_signal_optimization(signal_data: dict, klines: list, quote) -> dict:
         position_advice=position, risk_notes=risk_notes, risk_reward=risk_reward,
         trade_plan=plan, plain_summary=summary,
         market_policy="大盘评分影响综合评分、评级和仓位，不单独硬性否决个股买入信号。",
+        strong_new_high=strong_new_high,
     )
     log.info("signal_policy original=%s final=%s score=%s M=%s reasons=%s",
              original_action, action, score, m_score, reason_text)

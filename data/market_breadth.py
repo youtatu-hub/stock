@@ -12,6 +12,7 @@ from data.request_runtime import deadline_scope, request_id
 log = logging.getLogger("trend_data")
 REFRESH_INTERVAL_SECONDS = 120
 REFRESH_BUDGET_SECONDS = 30
+MAX_SCORING_AGE_SECONDS = 300
 
 
 def _iso_timestamp(value):
@@ -40,6 +41,7 @@ class MarketBreadthCache:
                 "updated_at": _iso_timestamp(self._updated_at),
                 "age_seconds": round(age, 1) if age is not None else None,
                 "stale": age is None or age >= self._interval or self._last_error is not None,
+                "usable_for_scoring": age is not None and age <= MAX_SCORING_AGE_SECONDS,
                 "refreshing": self._refreshing,
                 "last_attempt_at": _iso_timestamp(self._last_attempt_at),
                 "last_error": self._last_error,
