@@ -38,12 +38,16 @@ from data.kline_fetcher import (
 from data.market_breadth import market_breadth_cache
 from data.fund_flow_service import history_status, serialize_history, realtime_flow_service
 from data.fund_nav import fetch_fund_nav
+from data.fund_terms import fetch_fund_terms
+from data.etf_premium import fetch_etf_premium
+from data.instruments import get_instrument, instrument_catalog
 from data.request_runtime import collect_stages, fetch_required, request_id
 from analysis.signal_engine import run_analysis, SignalEngineResult
 from analysis.signal_policy import apply_signal_optimization as _apply_signal_optimization
 from analysis.chanlun_minute import analyze_chanlun_minute, signals_to_dict
 from analysis.chanlun_daily import analyze_chanlun_daily, daily_result_to_dict
 from analysis.fund_nav import analyze_fund_nav
+from analysis.asset_analysis import analyze_listed_fund
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("trend_app")
@@ -118,6 +122,8 @@ def signal_to_dict(r: SignalEngineResult) -> dict:
         "risk_warnings": r.risk_warnings,
         "key_levels": r.key_levels,
         "description": r.description,
+        "model": r.model,
+        "asset_metrics": r.asset_metrics,
         "trend": None,
         "patterns": [],
         "volume_price": None,
@@ -237,6 +243,11 @@ def handle_analyze(params: dict) -> dict:
         return {"error": "缺少symbol参数"}
 
     period = params.get("period", ["day"])[0].strip()
+    instrument = get_instrument(symbol)
+    if instrument["model"] == "nav":
+        return {"error": "场外基金请使用净值分析接口 /api/fund"}
+    if instrument["model"] != "stock":
+        return handle_asset_analyze(instrument, period)
     log.info(f"开始分析 {symbol} (period={period})")
 
     data, degraded, timings = collect_stages({
@@ -300,6 +311,7 @@ def handle_analyze(params: dict) -> dict:
              request_id.get(), symbol, period, timings, degraded)
     return {
         "symbol": symbol,
+        "instrument": instrument,
         "name": quote.name if quote else "",
         "quote": quote_to_dict(quote) if quote else None,
         "signal": signal_data,
@@ -316,6 +328,39 @@ def handle_analyze(params: dict) -> dict:
     }
 
 
+def handle_asset_analyze(instrument: dict, period: str) -> dict:
+    """场内基金只读取适用输入，不触发个股评分、大盘仓位限制或固定目标价。"""
+    symbol = instrument["code"]
+    data, degraded, timings = collect_stages({
+        "kline": lambda: fetch_kline(symbol, count=250, period=period, enrich=False),
+        "quote": lambda: fetch_quote(symbol),
+        "kline_extras": lambda: fetch_kline_extras(symbol, count=250, period=period),
+    }, required=("kline",))
+    klines = data.get("kline", [])
+    if len(klines) < 30:
+        return {"error": degraded.get("kline", f"K线数据不足: {len(klines)}条"), "degraded": degraded}
+    if klines[-1].stale:
+        degraded["kline"] = "K线使用最近成功快照，本次刷新未取得同等日期的新结果"
+    else:
+        klines = enrich_klines(klines, data.get("kline_extras", {}))
+    quote = data.get("quote")
+    if quote and quote.stale:
+        degraded["quote"] = "报价使用最近成功快照"
+    result = analyze_listed_fund(klines, instrument)
+    signal = signal_to_dict(result)
+    signal["input_snapshot"] = {
+        "status": "provisional" if klines[-1].stale else "complete",
+        "kline_through": klines[-1].date, "kline_stale": klines[-1].stale,
+        "basis": "仅以该品种的K线计算价格趋势与区间回撤，不参与个股综合评分。",
+    }
+    return {"symbol": symbol, "instrument": instrument, "name": quote.name if quote else instrument["name"],
+            "quote": quote_to_dict(quote) if quote else None, "signal": signal,
+            "klines": [kline_to_dict(bar) for bar in klines[-120:]], "flows": [],
+            "flow_status": history_status([]), "market_env": "", "breadth": None,
+            "breadth_status": {}, "kline_status": _kline_status(klines, period),
+            "analyzed_at": utc_now(), "degraded": degraded, "timings_ms": timings}
+
+
 def handle_quote(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
@@ -330,6 +375,48 @@ def handle_fund(params: dict) -> dict:
         return {"error": "基金代码必须为 6 位数字"}
     data = fetch_required("fund_nav", lambda: fetch_fund_nav(symbol))
     return {**data, **analyze_fund_nav(data["history"])}
+
+
+def handle_fund_terms(params: dict) -> dict:
+    symbol = params.get("symbol", [""])[0].strip()
+    if not re.fullmatch(r"[0-9]{6}", symbol):
+        return {"error": "基金代码必须为 6 位数字", "invalid": True}
+    instrument = get_instrument(symbol)
+    codes = [symbol] + ([instrument["peer_code"]] if instrument.get("peer_code") else [])
+    values, errors, _ = collect_stages(
+        {code: lambda code=code: fetch_fund_terms(code) for code in codes}, required=tuple(codes))
+    items = [{"instrument": get_instrument(code), "data": values.get(code), "error": errors.get(code)}
+             for code in codes]
+    result = {"symbol": symbol, "items": items, "status": "partial" if errors else "ok"}
+    if not values:
+        result.update(status="error", error="；".join(errors.values()))
+    return result
+
+
+def handle_etf_premium(params: dict) -> dict:
+    symbol = params.get("symbol", [""])[0].strip()
+    if not re.fullmatch(r"[0-9]{6}", symbol) or get_instrument(symbol)["asset_type"] != "overseas_etf":
+        return {"error": "仅支持已配置的海外ETF代码", "invalid": True}
+    values, errors, _ = collect_stages({
+        "iopv": lambda: fetch_etf_premium(symbol),
+        "nav": lambda: fetch_fund_nav(symbol),
+    }, required=("iopv", "nav"))
+    snapshot = values.get("iopv")
+    nav = values.get("nav")
+    disclosed = None
+    if nav:
+        latest = nav["history"][-1]
+        price = snapshot.get("price") if snapshot else None
+        disclosed = {"value": latest["nav"], "date": latest["date"],
+                     "premium_pct": round((price / latest["nav"] - 1) * 100, 3) if price else None,
+                     "source": nav["source"], "source_url": nav["source_url"],
+                     "fetched_at": nav["fetched_at"],
+                     "basis": "本ETF已披露单位净值，非盘中估值；与当前交易价格可能不在同一时点。"}
+    result = {"symbol": symbol, "iopv": snapshot, "disclosed_nav": disclosed,
+              "status": "partial" if errors else "ok", "errors": errors}
+    if not values:
+        result.update(status="error", error="；".join(errors.values()))
+    return result
 
 
 def handle_search(params: dict) -> dict:
@@ -391,6 +478,8 @@ def handle_chanlun_minute(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
+    if not get_instrument(symbol)["chanlun"]:
+        return {"error": "该资产类型未启用缠论模型"}
     md = fetch_required("minute", lambda: fetch_minute(symbol))
     if not md or not md.prices:
         return {"error": "获取分时数据失败"}
@@ -404,6 +493,8 @@ def handle_chanlun_daily(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
+    if not get_instrument(symbol)["chanlun"]:
+        return {"error": "该资产类型未启用缠论模型"}
     count = _parse_count(params, max_count=MAX_CHANLUN_COUNT)
     period = params.get("period", ["day"])[0].strip()
     klines = fetch_required("kline", lambda: fetch_kline(symbol, count=count, period=period, enrich=False))
@@ -752,6 +843,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == "/api/fund":
                     result = handle_fund(params)
                     self._json(result, 400 if "error" in result else 200)
+                elif path == "/api/instruments":
+                    self._json(instrument_catalog())
+                elif path in ("/api/fund-terms", "/api/etf-premium"):
+                    result = (handle_fund_terms if path == "/api/fund-terms" else handle_etf_premium)(params)
+                    self._json(result, 400 if result.get("invalid") else 503 if "error" in result else 200)
                 elif path == "/api/search":
                     self._json(handle_search(params))
                 elif path == "/api/kline":

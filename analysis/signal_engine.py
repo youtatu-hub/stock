@@ -27,8 +27,8 @@ MEDIUM_SCORE = 60   # score>=60   → 中信号
 @dataclass
 class SignalEngineResult:
     action: str
-    score: int
-    confidence: int
+    score: Optional[int]
+    confidence: Optional[int]
     risk_level: str
     signal_strength: str = ""
     trend: Optional[TrendResult] = None
@@ -44,6 +44,8 @@ class SignalEngineResult:
     description: str = ""
     plain_summary: str = ""
     trade_plan: Dict[str, Any] = field(default_factory=dict)
+    model: str = "stock"
+    asset_metrics: Dict[str, Any] = field(default_factory=dict)
 
 
 def _trend_to_score(trend: TrendResult) -> int:

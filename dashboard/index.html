@@ -7,6 +7,7 @@
 <script src="/vendor/echarts-5.5.0.min.js"></script>
 <script src="/request-loader.js"></script>
 <script src="/fund-view.js"></script>
+<script src="/asset-view.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -651,6 +652,23 @@ body {
   animation: pulse 1s ease infinite;
 }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+.asset-type { font-size: 12px; color: #aaa; }
+.asset-note { color: #999; font-size: 11px; line-height: 1.7; margin: 7px 0; overflow-wrap: anywhere; }
+.asset-note a { color: #83baf0; }
+.asset-metrics { display: grid; grid-template-columns: minmax(95px, 1fr) minmax(0, 1.4fr); gap: 7px 10px; font-size: 12px; margin: 12px 0; }
+.asset-metrics dt { color: #999; }
+.asset-metrics dd { text-align: right; color: #ddd; overflow-wrap: anywhere; }
+.asset-error, .asset-warning { color: #ffc107; background: #332708; border-radius: 5px; padding: 8px; font-size: 12px; line-height: 1.6; }
+.asset-metrics .premium-alert { color: #ffb74d; font-weight: bold; }
+.premium-nav { border-top: 1px solid #303030; margin-top: 12px; }
+.premium-settings { padding: 8px 12px 0; font-size: 12px; color: #aaa; }
+.premium-settings input { width: 62px; color: #ddd; background: #171717; border: 1px solid #444; border-radius: 4px; padding: 4px; }
+#premium-body, #fund-terms { padding: 0 12px 10px; }
+.fund-terms-share { padding: 12px 0; border-bottom: 1px solid #303030; }
+.fund-share-btn { padding: 5px 12px; background: #171717; color: #bbb; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
+.fund-share-btn.active { border-color: #ff9800; color: #ffb74d; }
+.fund-terms-share summary { color: #b8c9dc; font-size: 12px; cursor: pointer; }
+.fee-lines { font-size: 11px; line-height: 1.8; color: #ccc; }
 </style>
 </head>
 <body>
@@ -730,7 +748,7 @@ body {
       <div id="indicator-chart"></div>
       <div id="minute-chart"></div>
       <div id="minute-vol"></div>
-      <div class="flow-section">
+      <div class="flow-section" id="flow-section">
         <div class="fs-title">
           <span style="color:#ff9800">资金流向</span>
           <span id="flow-summary"></span>
@@ -758,6 +776,11 @@ body {
 
   <!-- ===== 右侧：信号 ===== -->
   <div class="right-panel">
+    <div class="signal-card" id="premium-card" hidden>
+      <div class="sc-header">ETF 折溢价参考</div>
+      <div class="premium-settings"><label>偏离提醒阈值 <input id="premium-threshold" type="number" min="0.1" max="100" step="0.1" value="3" required> %</label></div>
+      <div id="premium-body" aria-live="polite"></div>
+    </div>
     <!-- 一句话总结（小白第一眼看的） -->
     <div class="summary-card" id="summary-card">
       <div class="sc-header">AI 分析结论</div>
@@ -797,7 +820,7 @@ body {
 
     <!-- CANSLIM -->
     <div class="signal-card" data-card="canslim">
-      <div class="sc-header" onclick="toggleCard(this)"><span class="sc-arrow">▼</span>CAN SLIM</div>
+      <div class="sc-header" onclick="toggleCard(this)"><span class="sc-arrow">▼</span>CAN SLIM 技术代理评分</div>
       <div class="cs-grid" id="cs-grid"></div>
       <div id="cs-simple"></div>
     </div>
@@ -855,6 +878,10 @@ body {
     <div class="fund-note" id="fund-status" role="status" aria-live="polite"></div>
   </div>
   <div class="right-panel">
+    <div class="signal-card">
+      <div class="sc-header">申赎状态与 A/C 费用</div>
+      <div id="fund-terms" aria-live="polite"></div>
+    </div>
     <div class="signal-card">
       <div class="sc-header">净值趋势参考</div>
       <div class="fund-note" id="fund-summary"></div>
@@ -2007,6 +2034,10 @@ function renderRealtimeFlow(data) {
 // ===== 一句话总结（小白第一眼看的） =====
 function renderSummary(signal) {
   const el = document.getElementById('sum-body');
+  if (signal.model && signal.model !== 'stock') {
+    el.innerHTML = assetSummaryHtml(signal, currentInstrument(), escHtml);
+    return;
+  }
   const action = signal.action;
   const isBuy = action.includes('买入') && action !== '谨慎买入';
   const isCautious = action === '谨慎买入';
@@ -2163,9 +2194,12 @@ function renderTradePlan(signal) {
 function renderSignal(signal) {
   // 一句话总结
   renderSummary(signal);
-  if (signal.input_snapshot) {
+  if (signal.input_snapshot && (!signal.model || signal.model === 'stock' || signal.input_snapshot.kline_stale)) {
     const input = signal.input_snapshot;
-    document.getElementById('sum-body').insertAdjacentHTML('beforeend', `<div style="font-size:11px;color:#888;margin-top:6px">${input.status === 'provisional' ? '暂定评分（部分输入缺失或未更新）' : '评分输入'}：K线截至 ${escHtml(input.kline_through)}${input.kline_stale ? '（最近成功快照，本次刷新未取得同等日期的新结果）' : ''}，日级资金流截至 ${escHtml(input.flow_through || '缺失')}。${escHtml(input.basis)}</div>`);
+    const stockModel = !signal.model || signal.model === 'stock';
+    const label = stockModel ? (input.status === 'provisional' ? '暂定评分（部分输入缺失或未更新）' : '评分输入') : '参考数据';
+    const flow = stockModel ? `，日级资金流截至 ${escHtml(input.flow_through || '缺失')}` : '';
+    document.getElementById('sum-body').insertAdjacentHTML('beforeend', `<div class="asset-note">${label}：K线截至 ${escHtml(input.kline_through)}${input.kline_stale ? '（旧快照）' : ''}${flow}。${escHtml(input.basis)}</div>`);
   }
 
   // 操作计划
@@ -2174,7 +2208,7 @@ function renderSignal(signal) {
   // 模块评分
   const ml = document.getElementById('module-list');
   const ms = signal.module_scores || {};
-  const labels = { '趋势': '趋势方向', '形态': '图表形态', '量价': '量价关系', '突破': '突破信号', 'CAN_SLIM': '综合基本面' };
+  const labels = { '趋势': '趋势方向', '形态': '图表形态', '量价': '量价关系', '突破': '突破信号', 'CAN_SLIM': '技术代理评分' };
   const sorted = Object.entries(ms).sort((a, b) => b[1] - a[1]);
   ml.innerHTML = sorted.map(([k, v]) => {
     const pct = Math.min(100, Math.max(0, v));
@@ -2203,9 +2237,12 @@ function renderSignal(signal) {
     const coreTag = isCore ? '<span class="sig-core-tag">核心</span>' : '';
     if (s.type === 'buy') return `<div class="sig-item sig-buy">▲ ${s.text}${coreTag}</div>`;
     else return `<div class="sig-item sig-sell">▼ ${s.text}${coreTag}</div>`;
-  }).join('') || '<div style="color:#555;font-size:12px;padding:8px">暂无信号</div>';
+  }).join('') || `<div style="color:#999;font-size:12px;padding:8px">${signal.model === 'technical' ? '以下为突破模型参考，不代表实际持仓或交易指令。' : '暂无信号'}</div>`;
   for (const breakout of signal.breakouts || []) {
-    if (!breakout.entry_price || breakout.direction === 'none') continue;
+    if (!breakout.entry_price || breakout.direction === 'none') {
+      if (signal.model === 'technical') sl.innerHTML += `<div class="asset-note">${escHtml(breakout.system)}：${escHtml(breakout.signal)}</div>`;
+      continue;
+    }
     const side = breakout.direction === 'short' ? '做空' : '做多';
     sl.innerHTML += `<div style="padding:6px 8px;font-size:11px;color:#aaa;border-top:1px solid #222">
       ${escHtml(breakout.system)} · ${side}模型 · ${escHtml(breakout.signal)}<br>
@@ -2231,9 +2268,9 @@ function renderCanslim(cs) {
     { l: 'C', s: cs.c_score, n: '近期动力', tip: '近期价格涨势' },
     { l: 'A', s: cs.a_score, n: '中期趋势', tip: '中期价格趋势' },
     { l: 'N', s: cs.n_score, n: '新高形态', tip: '是否创新高/新底部' },
-    { l: 'S', s: cs.s_score, n: '供需关系', tip: '换手率/量价配合' },
-    { l: 'L', s: cs.l_score, n: '领涨强度', tip: '相对大盘强度' },
-    { l: 'I', s: cs.i_score, n: '机构资金', tip: '主力资金流向' },
+    { l: 'S', s: cs.s_score, n: '量能供需', tip: '当前量与近期成交量比较' },
+    { l: 'L', s: cs.l_score, n: '阶段涨势', tip: '60日和较长区间的价格涨幅' },
+    { l: 'I', s: cs.i_score, n: '资金流代理', tip: '使用主力资金流，非机构实际持仓' },
     { l: 'M', s: cs.m_score, n: '大盘环境', tip: '市场整体方向' },
   ];
   document.getElementById('cs-grid').innerHTML = items.map(i => {
@@ -2248,7 +2285,7 @@ function renderCanslim(cs) {
   }).join('');
 
   // 小白模式简化显示
-  const totalScore = Math.round((cs.c_score + cs.a_score + cs.n_score + cs.s_score + cs.l_score + cs.i_score + cs.m_score) / 7);
+  const totalScore = cs.total;
   const tColor = totalScore >= 65 ? C.up : totalScore >= 45 ? '#ffc107' : C.down;
   const tLabel = totalScore >= 65 ? '良好' : totalScore >= 45 ? '一般' : '较差';
   // 找最强和最弱维度
@@ -2257,8 +2294,9 @@ function renderCanslim(cs) {
   document.getElementById('cs-simple').innerHTML = `
     <div style="display:flex;align-items:center;gap:8px">
       <span class="cs-simple-score" style="color:${tColor}">${totalScore}</span>
-      <span class="cs-simple-label">基本面综合评分（${tLabel}）</span>
+      <span class="cs-simple-label">技术代理评分（${tLabel}）</span>
     </div>
+    <div class="asset-note">价格与资金流代理指标，未使用企业盈利数据；使用统一加权总分。</div>
     <div style="font-size:11px;color:#888;margin-top:6px">
       最强：<span style="color:${best.s >= 65 ? C.up : '#ffc107'}">${best.n} ${best.s}分</span>　
       最弱：<span style="color:${worst.s >= 45 ? '#ffc107' : C.down}">${worst.n} ${worst.s}分</span>
@@ -2544,6 +2582,46 @@ function setStageStatus(stage, label, state, error = false) {
 
 const ANALYSIS_REFRESH_MS = 30000;
 
+function currentInstrument() {
+  return resolveInstrument(instrumentCatalog, currentSymbol);
+}
+
+function applyAssetVisibility(instrument) {
+  const stock = instrument.model === 'stock';
+  for (const name of ['module', 'canslim', 'levels', 'accuracy']) {
+    document.querySelector(`[data-card="${name}"]`).hidden = !stock;
+  }
+  const signalsCard = document.querySelector('[data-card="signals"]');
+  signalsCard.hidden = !stock && instrument.model !== 'technical';
+  signalsCard.querySelector('.sc-header').innerHTML = `<span class="sc-arrow">▼</span>${stock ? '买卖信号' : '突破模型参考'}`;
+  for (const id of ['plan-card', 'market-card']) document.getElementById(id).hidden = !stock;
+  for (const id of ['chanlun-card', 'chanlun-daily-card']) document.getElementById(id).hidden = !instrument.chanlun;
+  document.getElementById('flow-section').hidden = !stock && instrument.model !== 'technical';
+  document.getElementById('premium-card').hidden = instrument.asset_type !== 'overseas_etf';
+  document.getElementById('premium-body').textContent = '';
+  document.getElementById('summary-card').querySelector('.sc-header').textContent = stock ? '分析结论' : '资产观察';
+}
+
+function refreshPremiumPanel(session) {
+  if (session.premiumData) {
+    const input = document.getElementById('premium-threshold');
+    const threshold = input.checkValidity() && input.value !== '' ? Number(input.value) : NaN;
+    document.getElementById('premium-body').innerHTML = premiumHtml(session.premiumData, threshold, escHtml);
+  }
+}
+
+function loadPremium(symbol, session) {
+  if (session.premiumRefreshing) return;
+  session.premiumRefreshing = true;
+  return session.run('premium', `${API}/api/etf-premium?symbol=${encodeURIComponent(symbol)}`, data => {
+    session.premiumData = data;
+    refreshPremiumPanel(session);
+  }, error => {
+    session.premiumData = null;
+    document.getElementById('premium-body').textContent = `折溢价参考获取失败：${error.message}；暂停提醒。`;
+  }).finally(() => { session.premiumRefreshing = false; });
+}
+
 function clearAnalysisPanels() {
   document.getElementById('sum-body').textContent = '分析加载中…';
   for (const id of ['risk-list', 'market-body', 'module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid']) {
@@ -2562,6 +2640,11 @@ function renderAnalysisStatus(session) {
 }
 
 async function analyze(symbol) {
+  if (!instrumentCatalog) {
+    document.getElementById('quote-bar').textContent = '品种目录尚未就绪，请等待加载完成。';
+    return;
+  }
+  symbol = resolveInstrument(instrumentCatalog, symbol).code;
   stopFlowRequests();
   if (_loadSession) _loadSession.cancel();
   if (_minuteSession) _minuteSession.cancel();
@@ -2590,6 +2673,12 @@ async function analyze(symbol) {
     loadFund(symbol, session);
     return;
   }
+  const instrument = currentInstrument();
+  applyAssetVisibility(instrument);
+  if (instrument.asset_type === 'overseas_etf') {
+    document.getElementById('premium-body').textContent = '正在核对IOPV参考值与已披露净值…';
+    loadPremium(symbol, session);
+  }
   _lastQuote = readQuoteSnapshot(symbol);
   clearAnalysisPanels();
   for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) chart.clear();
@@ -2612,7 +2701,7 @@ async function analyze(symbol) {
   }
   setStageStatus('kline', 'K 线', '加载中');
   setStageStatus('analysis', '分析', '加载中');
-  setStageStatus('chanlun', '缠论', '加载中');
+  setStageStatus('chanlun', '缠论', instrument.chanlun ? '加载中' : '该资产未启用');
   updateStarButton(symbol);
   const periodParam = currentView === 'week' ? '&period=week' : '';
   const query = `symbol=${encodeURIComponent(symbol)}${periodParam}`;
@@ -2655,7 +2744,8 @@ async function analyze(symbol) {
       chartReady = true;
       if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
       updateKlineStatus(data.kline_status);
-      renderFlow(data.flows, data.flow_status);
+      if (instrument.model === 'stock') renderFlow(data.flows, data.flow_status);
+      else if (instrument.model === 'technical' && _flowMode === 'daily') loadHistoricalFlow(symbol);
       renderSignal(data.signal);
       renderCanslim(data.signal.canslim);
       renderKeyLevels(data.signal.key_levels);
@@ -2680,16 +2770,16 @@ async function analyze(symbol) {
       }
 
       // 信号变更检测 & Toast提醒
-      checkSignalChange(symbol, _sName, _sAction, _sScore, _sPrice);
+      if (instrument.model === 'stock') checkSignalChange(symbol, _sName, _sAction, _sScore, _sPrice);
 
       // 记录信号到localStorage（用于准确率统计）
-      if (_sAction && _sPrice > 0 && session.recordedInput !== data.signal.input_snapshot?.id) {
+      if (instrument.model === 'stock' && _sAction && _sPrice > 0 && session.recordedInput !== data.signal.input_snapshot?.id) {
         recordSignal(symbol, _sName, _sAction, _sScore, _sPrice);
         session.recordedInput = data.signal.input_snapshot?.id;
       }
 
       // 渲染信号准确率统计
-      renderSignalAccuracy(symbol);
+      if (instrument.model === 'stock') renderSignalAccuracy(symbol);
 
     }, error => {
       session.analysisData = null;
@@ -2703,7 +2793,7 @@ async function analyze(symbol) {
   };
   session.refreshAnalysis();
 
-  session.refreshChanlun = () => session.run('chanlun', `${API}/api/chanlun_daily?${query}&count=250`, data => {
+  session.refreshChanlun = () => instrument.chanlun && session.run('chanlun', `${API}/api/chanlun_daily?${query}&count=250`, data => {
     _dailyChanlun = data;
     if (currentView !== 'minute') renderChanlunDaily(data);
     if (chartReady) applyChanlunDailyOverlay(data);
@@ -2714,7 +2804,7 @@ async function analyze(symbol) {
   });
   session.refreshChanlun();
 
-  if (_flowMode === 'realtime') loadRealtimeFlow(symbol);
+  if (_flowMode === 'realtime' && !document.getElementById('flow-section').hidden) loadRealtimeFlow(symbol);
   if (currentView === 'minute') loadMinute(symbol);
   _refreshTimer = setInterval(() => refreshQuote(symbol), 2000);
 }
@@ -2724,6 +2814,13 @@ function loadFund(symbol, session) {
   _currentStockName = knownStockName(symbol);
   updateStarButton(symbol);
   _fundView.reset(fundDetailUrl(symbol));
+  const terms = document.getElementById('fund-terms');
+  terms.textContent = '正在获取申赎规则与 A/C 费率…';
+  session.run('fund_terms', `${API}/api/fund-terms?symbol=${encodeURIComponent(symbol)}`, data => {
+    terms.innerHTML = fundTermsHtml(data, escHtml);
+  }, error => {
+    terms.textContent = `申赎规则获取失败：${error.message}。请查看基金公告与销售渠道规则；可点击刷新净值重试。`;
+  });
   document.getElementById('quote-bar').textContent = `${_currentStockName}（${symbol}）净值加载中…`;
   return session.run('fund', `${API}/api/fund?symbol=${encodeURIComponent(symbol)}`, data => {
     _fundView.render(data);
@@ -2768,9 +2865,11 @@ async function refreshQuote(symbol) {
     }
   } finally {
     session.quoteRefreshing = false;
+    if (session.active) refreshPremiumPanel(session);
     if (session.active && Date.now() - session.analysisStarted >= ANALYSIS_REFRESH_MS && !session.analysisRefreshing) {
       session.refreshAnalysis();
       session.refreshChanlun();
+      if (currentInstrument().asset_type === 'overseas_etf') loadPremium(symbol, session);
     }
   }
 }
@@ -2828,7 +2927,7 @@ async function loadMinute(symbol) {
   _minuteYRange = null;
   _minuteData = null;
   _minuteChanlun = null;
-  document.getElementById('chanlun-card').style.display = 'block';
+  document.getElementById('chanlun-card').style.display = currentInstrument().chanlun ? 'block' : 'none';
   document.getElementById('chanlun-body').textContent = '分时缠论加载中…';
   session.run('minute', `${API}/api/minute?symbol=${encodeURIComponent(symbol)}`, data => {
     _minuteData = data;
@@ -2836,7 +2935,7 @@ async function loadMinute(symbol) {
   }, error => {
     minuteChart.setOption({ title: { text: error.message, left: 'center', top: 'center', textStyle: { color: C.down, fontSize: 14 } } }, true);
   });
-  session.run('chanlun_minute', `${API}/api/chanlun_minute?symbol=${encodeURIComponent(symbol)}`, data => {
+  if (currentInstrument().chanlun) session.run('chanlun_minute', `${API}/api/chanlun_minute?symbol=${encodeURIComponent(symbol)}`, data => {
     _minuteChanlun = data;
     renderChanlun(data);
     if (_minuteData) renderMinute(_minuteData, data);
@@ -2891,34 +2990,11 @@ async function refreshMinuteLight(symbol) {
 // ===== 自选股 & 历史记录 =====
 const STORAGE_WATCH = 'qs_watchlist';
 const STORAGE_HISTORY = 'qs_history';
-const STORAGE_FOCUS_SEEDED = 'qs_focus_seeded_v2';
-const FOCUS_GROUPS = [
-  { id: 'steady', name: '稳健压舱石', stocks: [
-    { code: '511360', name: '短融ETF海富通' },
-  ] },
-  { id: 'core', name: '核心进攻', stocks: [
-    { code: '512050', name: 'A500ETF华夏' },
-  ] },
-  { id: 'dividend', name: '红利防御', stocks: [
-    { code: '512890', name: '红利低波ETF' },
-  ] },
-  { id: 'us-premium', name: '美股溢价观察', stocks: [
-    { code: '513500', name: '标普500ETF博时' },
-    { code: '513300', name: '纳斯达克ETF华夏' },
-    { code: '159501', name: '纳指ETF嘉实' },
-    { code: '159941', name: '纳指ETF广发' },
-    { code: '513100', name: '纳指ETF国泰' },
-  ] },
-  { id: 'otc-etf', name: '场外ETF', type: 'fund', stocks: [
-    { code: '050025', name: '博时标普500ETF联接(QDII)A' },
-    { code: '015299', name: '华夏纳斯达克100ETF联接(QDII)A' },
-    { code: '016055', name: '博时纳斯达克100ETF联接(QDII)A' },
-    { code: '270042', name: '广发纳斯达克100ETF联接(QDII)A' },
-    { code: '040046', name: '华安纳斯达克100ETF联接(QDII)A' },
-  ] },
-];
+const STORAGE_FOCUS_SEEDED = 'qs_focus_seeded_v3';
+let instrumentCatalog = null;
+let FOCUS_GROUPS = [];
 const MAX_HISTORY = 30;
-let _activeFocusGroup = FOCUS_GROUPS[0].id;
+let _activeFocusGroup = '';
 let _currentTab = 'watch';
 let _panelOpen = false;
 
@@ -2927,7 +3003,7 @@ function focusGroupFor(code) {
 }
 
 function isFundSymbol(code) {
-  return focusGroupFor(code)?.type === 'fund';
+  return resolveInstrument(instrumentCatalog, code).model === 'nav';
 }
 
 function fundDetailUrl(code) {
@@ -2947,21 +3023,9 @@ function groupedWatchlist(list) {
 
 function initializeFocusWatchlist() {
   if (localStorage.getItem(STORAGE_FOCUS_SEEDED)) return;
-  // 老用户仅补入新目录，保留之前移除或清空的场内自选。
-  const groups = localStorage.getItem('qs_focus_seeded_v1')
-    ? FOCUS_GROUPS.filter(group => group.id === 'otc-etf') : FOCUS_GROUPS;
-  const list = getWatchlist();
-  const existingCodes = new Set(list.map(stock => stock.code));
-  for (const group of groups) {
-    for (const stock of group.stocks) {
-      if (!existingCodes.has(stock.code)) {
-        list.push({ ...stock, addedAt: Date.now() });
-        existingCodes.add(stock.code);
-      }
-    }
-  }
-  saveWatchlist(list);
-  // 只迁入一次；之后取消关注或清空自选不会被刷新页面重新加回。
+  const previousVersion = localStorage.getItem('qs_focus_seeded_v2') ? 2
+    : localStorage.getItem('qs_focus_seeded_v1') ? 1 : 0;
+  saveWatchlist(seedInstrumentWatchlist(instrumentCatalog, getWatchlist(), previousVersion));
   localStorage.setItem(STORAGE_FOCUS_SEEDED, '1');
 }
 
@@ -3071,7 +3135,7 @@ function renderWatchlist() {
     <section class="wp-group">
       <h3 class="wp-group-title">${group.name}<span>${group.stocks.length}</span></h3>
       ${group.stocks.map(s => {
-    const tag = group.type === 'fund' ? '<span class="sig-tag none">净值分析</span>' : sigTag(s.action, s.score);
+    const tag = instrumentTag(s);
     return `<div class="wp-item" onclick="analyze('${s.code}');closePanel()">
       <span class="code">${s.code}</span>
       <span class="name">${escHtml(s.name)}</span>
@@ -3090,7 +3154,7 @@ function renderHistory() {
     return;
   }
   el.innerHTML = list.map(s => {
-    const tag = sigTag(s.action, s.score);
+    const tag = instrumentTag(s);
     const t = fmtTime(s.time);
     return `<div class="wp-item" onclick="analyze('${s.code}');closePanel()">
       <span class="code">${s.code}</span>
@@ -3099,6 +3163,13 @@ function renderHistory() {
       <span class="time">${t}</span>
     </div>`;
   }).join('');
+}
+
+function instrumentTag(item) {
+  const instrument = resolveInstrument(instrumentCatalog, item.code);
+  if (instrument.model === 'nav') return '<span class="sig-tag none">净值分析</span>';
+  if (instrument.model !== 'stock') return '<span class="sig-tag none">价格参考</span>';
+  return sigTag(item.action, item.score);
 }
 
 function sigTag(action, score) {
@@ -3225,16 +3296,32 @@ document.getElementById('wp-panel').addEventListener('click', e => e.stopPropaga
 let _currentStockName = '';
 
 // ===== 启动 =====
-initializeFocusWatchlist();
-renderFocusNavigation();
-initCharts();
-updateBadges();
-// 加载模式设置
-loadMode();
-// 自动加载上次分析的品种；首次使用默认打开关注目录中的短融ETF。
-const _hist = getHistory();
-const _lastSymbol = (_hist.length > 0) ? _hist[0].code : FOCUS_GROUPS[0].stocks[0].code;
-analyze(_lastSymbol);
+async function initializeDashboard() {
+  const catalog = await new StockLoadSession().request(`${API}/api/instruments`);
+  instrumentCatalog = catalog;
+  FOCUS_GROUPS = catalog.groups;
+  _activeFocusGroup = FOCUS_GROUPS[0].id;
+  initializeFocusWatchlist();
+  renderFocusNavigation();
+  initCharts();
+  updateBadges();
+  loadMode();
+  const history = getHistory();
+  analyze(history.length ? history[0].code : FOCUS_GROUPS[0].stocks[0].code);
+}
+
+document.getElementById('fund-terms').addEventListener('click', event => {
+  const button = event.target.closest('[data-fund-code]');
+  if (button) analyze(button.dataset.fundCode);
+});
+document.getElementById('premium-threshold').addEventListener('input', () => {
+  if (_loadSession?.active) refreshPremiumPanel(_loadSession);
+});
+initializeDashboard().catch(error => {
+  console.error('[initialization]', error);
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('quote-bar').textContent = `品种目录加载失败：${error.message}，请刷新页面重试。`;
+});
 
 // ===== 小白/专业模式切换 =====
 function loadMode() {
@@ -3551,7 +3638,8 @@ async function loadOverview() {
         code: s.code, name: knownStockName(s.code, q.name),
         price: q.price, pct: q.pct, volume: q.volume,
         stale: !!q.stale, fetched_at: q.fetched_at,
-        action: s.action || '', score: s.score || 0,
+        action: resolveInstrument(instrumentCatalog, s.code).model === 'stock' ? s.action || '' : '价格参考',
+        score: resolveInstrument(instrumentCatalog, s.code).model === 'stock' ? s.score : null,
       };
     } catch(e) {
       return { code: s.code, name: s.name, error: true };
