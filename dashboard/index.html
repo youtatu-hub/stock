@@ -6,8 +6,10 @@
 <title>趋势分析实时买卖点</title>
 <script src="/vendor/echarts-5.5.0.min.js"></script>
 <script src="/request-loader.js"></script>
+<script src="/fund-view.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { height: 100%; overflow: hidden; }
 body {
   font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif;
@@ -341,6 +343,20 @@ body {
 .focus-members-label { color: #666; font-size: 11px; white-space: nowrap; margin-right: 4px; }
 .focus-stock-code { margin-left: 8px; font-size: 11px; opacity: 0.65; font-family: monospace; }
 .focus-empty { color: #777; font-size: 12px; white-space: nowrap; }
+.fund-view .chart-toolbar { flex-wrap: wrap; }
+#fund-chart { flex: 1; min-height: 300px; }
+.fund-note { padding: 10px 12px; font-size: 12px; color: #999; line-height: 1.7; }
+.fund-note a { color: #ff9800; }
+.fund-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px; }
+.fund-metrics dt { font-size: 11px; color: #888; margin-bottom: 5px; }
+.fund-metrics dd { font-size: 19px; }
+.fund-direction { font-size: 24px; margin-bottom: 8px; }
+.wp-ov-item.fund-overview { grid-template-columns: 48px 1fr 60px 58px 65px; }
+@media (max-width: 1100px) {
+  .fund-view { overflow-y: auto; }
+  .fund-view .left-panel { min-height: 480px; }
+  .fund-view .right-panel { overflow-y: visible; }
+}
 
 /* ===== 缠论信号面板 ===== */
 .chanlun-card {
@@ -683,7 +699,7 @@ body {
   <span id="status-analysis">分析：等待</span>
   <span id="status-chanlun">缠论：等待</span>
 </div>
-<div class="main">
+<div class="main" id="stock-view">
   <!-- ===== 左侧：图表 ===== -->
   <div class="left-panel">
     <div class="chart-toolbar">
@@ -819,6 +835,46 @@ body {
   </div>
 </div>
 
+<div class="main fund-view" id="fund-view" hidden>
+  <div class="left-panel">
+    <div class="chart-toolbar">
+      <button class="tb-btn active" data-fund-period="day">日净值</button>
+      <button class="tb-btn" data-fund-period="week">周净值</button>
+      <div class="tb-sep"></div>
+      <button class="tb-btn" data-fund-range="30">1月</button>
+      <button class="tb-btn active" data-fund-range="90">3月</button>
+      <button class="tb-btn" data-fund-range="180">半年</button>
+      <button class="tb-btn" data-fund-range="365">1年</button>
+      <button class="tb-btn" data-fund-range="0">全部已加载</button>
+      <div class="tb-sep"></div>
+      <button class="tb-btn active" data-fund-indicator="macd">MACD</button>
+      <button class="tb-btn" data-fund-indicator="rsi">RSI</button>
+      <button class="tb-btn" onclick="analyze(currentSymbol)">刷新净值</button>
+    </div>
+    <div id="fund-chart"></div>
+    <div class="fund-note" id="fund-status" role="status" aria-live="polite"></div>
+  </div>
+  <div class="right-panel">
+    <div class="signal-card">
+      <div class="sc-header">净值趋势参考</div>
+      <div class="fund-note" id="fund-summary"></div>
+    </div>
+    <div class="signal-card">
+      <div class="sc-header">阶段表现</div>
+      <dl class="fund-metrics" id="fund-metrics"></dl>
+    </div>
+    <div class="signal-card">
+      <div class="sc-header">净值与交易说明</div>
+      <div class="fund-note">
+        场外基金按公布的净值申购、赎回。QDII 净值披露可能滞后，具体日期以上方标注为准。<br>
+        走势按公布的日涨跌幅复权，末值对齐最新单位净值；均线、MACD、RSI用于观察趋势。<br>
+        这里不提供分时、成交量、资金流或场内买卖信号。实际成交净值、确认时间及费用以基金规则为准。<br>
+        <a id="fund-source-link" target="_blank" rel="noopener noreferrer">查看基金公告与申赎规则 ↗</a>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast-container" id="toast-container"></div>
 
 <script>
@@ -831,6 +887,7 @@ let _klineData = [];
 let _zoomBound = false;
 let _refreshTimer = null;
 let _loadSession = null;
+let _fundView = null;
 let _minuteSession = null;
 let _minuteData = null;      // 缓存分时数据
 let _minuteChanlun = null;   // 缓存缠论分时分析结果
@@ -2524,6 +2581,15 @@ async function analyze(symbol) {
   _dailyFlowStatus = {};
   _lastSignalData = null;
   _currentStockName = '';
+  const isFund = isFundSymbol(symbol);
+  document.getElementById('stock-view').hidden = isFund;
+  document.getElementById('load-status').hidden = isFund;
+  document.getElementById('fund-view').hidden = !isFund;
+  if (isFund) {
+    _lastQuote = null;
+    loadFund(symbol, session);
+    return;
+  }
   _lastQuote = readQuoteSnapshot(symbol);
   clearAnalysisPanels();
   for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) chart.clear();
@@ -2651,6 +2717,32 @@ async function analyze(symbol) {
   if (_flowMode === 'realtime') loadRealtimeFlow(symbol);
   if (currentView === 'minute') loadMinute(symbol);
   _refreshTimer = setInterval(() => refreshQuote(symbol), 2000);
+}
+
+function loadFund(symbol, session) {
+  if (!_fundView) _fundView = new FundView(document.getElementById('fund-view'), {colors: C, escHtml, calcMACD, calcRSI});
+  _currentStockName = knownStockName(symbol);
+  updateStarButton(symbol);
+  _fundView.reset(fundDetailUrl(symbol));
+  document.getElementById('quote-bar').textContent = `${_currentStockName}（${symbol}）净值加载中…`;
+  return session.run('fund', `${API}/api/fund?symbol=${encodeURIComponent(symbol)}`, data => {
+    _fundView.render(data);
+    _currentStockName = knownStockName(symbol, data.name);
+    const latest = data.latest;
+    const pct = latest.change_pct;
+    const cls = pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat';
+    const pctText = pct == null ? '--' : `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`;
+    document.getElementById('quote-bar').innerHTML = `
+      <span class="qb-name">${escHtml(_currentStockName)}</span>
+      <span class="qb-price ${cls}">${latest.nav.toFixed(4)}</span>
+      <span class="qb-pct ${cls}">${pctText}</span>
+      <span class="qb-meta">单位净值 · ${escHtml(latest.date)}</span>
+      <span class="qb-timing">${escHtml(data.source)} · 获取于 ${formatDataTime(data.fetched_at)} · 非实时成交价</span>`;
+    addHistory(symbol, _currentStockName, '', 0);
+  }, error => {
+    _fundView.showError(error.message);
+    document.getElementById('quote-bar').textContent = `${knownStockName(symbol)}（${symbol}）净值获取失败`;
+  });
 }
 
 async function refreshQuote(symbol) {
@@ -2799,7 +2891,7 @@ async function refreshMinuteLight(symbol) {
 // ===== 自选股 & 历史记录 =====
 const STORAGE_WATCH = 'qs_watchlist';
 const STORAGE_HISTORY = 'qs_history';
-const STORAGE_FOCUS_SEEDED = 'qs_focus_seeded_v1';
+const STORAGE_FOCUS_SEEDED = 'qs_focus_seeded_v2';
 const FOCUS_GROUPS = [
   { id: 'steady', name: '稳健压舱石', stocks: [
     { code: '511360', name: '短融ETF海富通' },
@@ -2817,6 +2909,13 @@ const FOCUS_GROUPS = [
     { code: '159941', name: '纳指ETF广发' },
     { code: '513100', name: '纳指ETF国泰' },
   ] },
+  { id: 'otc-etf', name: '场外ETF', type: 'fund', stocks: [
+    { code: '050025', name: '博时标普500ETF联接(QDII)A' },
+    { code: '015299', name: '华夏纳斯达克100ETF联接(QDII)A' },
+    { code: '016055', name: '博时纳斯达克100ETF联接(QDII)A' },
+    { code: '270042', name: '广发纳斯达克100ETF联接(QDII)A' },
+    { code: '040046', name: '华安纳斯达克100ETF联接(QDII)A' },
+  ] },
 ];
 const MAX_HISTORY = 30;
 let _activeFocusGroup = FOCUS_GROUPS[0].id;
@@ -2827,10 +2926,18 @@ function focusGroupFor(code) {
   return FOCUS_GROUPS.find(group => group.stocks.some(stock => stock.code === code));
 }
 
+function isFundSymbol(code) {
+  return focusGroupFor(code)?.type === 'fund';
+}
+
+function fundDetailUrl(code) {
+  return isFundSymbol(code) ? `https://fund.eastmoney.com/${code}.html` : '';
+}
+
 function groupedWatchlist(list) {
   const byCode = new Map(list.map(stock => [stock.code, stock]));
   const groups = FOCUS_GROUPS.map(group => ({
-    id: group.id, name: group.name,
+    id: group.id, name: group.name, type: group.type,
     stocks: group.stocks.map(stock => byCode.get(stock.code)).filter(Boolean),
   }));
   const others = list.filter(stock => !focusGroupFor(stock.code));
@@ -2840,9 +2947,12 @@ function groupedWatchlist(list) {
 
 function initializeFocusWatchlist() {
   if (localStorage.getItem(STORAGE_FOCUS_SEEDED)) return;
+  // 老用户仅补入新目录，保留之前移除或清空的场内自选。
+  const groups = localStorage.getItem('qs_focus_seeded_v1')
+    ? FOCUS_GROUPS.filter(group => group.id === 'otc-etf') : FOCUS_GROUPS;
   const list = getWatchlist();
   const existingCodes = new Set(list.map(stock => stock.code));
-  for (const group of FOCUS_GROUPS) {
+  for (const group of groups) {
     for (const stock of group.stocks) {
       if (!existingCodes.has(stock.code)) {
         list.push({ ...stock, addedAt: Date.now() });
@@ -2869,14 +2979,15 @@ function renderFocusNavigation() {
     </button>`).join('');
   const group = groups.find(item => item.id === _activeFocusGroup);
   const members = document.getElementById('focus-members');
-  members.innerHTML = '<span class="focus-members-label">关注品种</span>' + (group.stocks.length
+  const isFund = group.type === 'fund';
+  members.innerHTML = `<span class="focus-members-label">${isFund ? '场外基金' : '关注品种'}</span>` + (group.stocks.length
     ? group.stocks.map(stock => `
       <button class="focus-stock-btn${stock.code === currentSymbol ? ' active' : ''}"
-        aria-pressed="${stock.code === currentSymbol}" title="${escHtml(stock.name)} ${stock.code}"
+        aria-pressed="${stock.code === currentSymbol}" title="${escHtml(stock.name)} ${stock.code}${isFund ? ' · 查看净值走势与趋势参考' : ''}"
         onclick="analyze('${stock.code}')">
         ${escHtml(stock.name)}<span class="focus-stock-code">${stock.code}</span>
       </button>`).join('')
-    : '<span class="focus-empty">该目录暂无关注，可搜索对应品种后点击 ☆ 添加</span>');
+    : `<span class="focus-empty">${isFund ? '该目录暂无关注基金' : '该目录暂无关注，可搜索对应品种后点击 ☆ 添加'}</span>`);
 }
 
 // --- localStorage 读写 ---
@@ -2960,7 +3071,7 @@ function renderWatchlist() {
     <section class="wp-group">
       <h3 class="wp-group-title">${group.name}<span>${group.stocks.length}</span></h3>
       ${group.stocks.map(s => {
-    const tag = sigTag(s.action, s.score);
+    const tag = group.type === 'fund' ? '<span class="sig-tag none">净值分析</span>' : sigTag(s.action, s.score);
     return `<div class="wp-item" onclick="analyze('${s.code}');closePanel()">
       <span class="code">${s.code}</span>
       <span class="name">${escHtml(s.name)}</span>
@@ -3431,9 +3542,11 @@ async function loadOverview() {
   // 并行获取所有自选股的简要行情
   const results = await Promise.all(list.map(async s => {
     try {
-      const r = await fetch(`${API}/api/quote?symbol=${s.code}`);
+      const isFund = isFundSymbol(s.code);
+      const r = await fetch(`${API}/api/${isFund ? 'fund' : 'quote'}?symbol=${s.code}`);
       const q = await r.json();
-      if (q.error) return { code: s.code, name: s.name, error: true };
+      if (!r.ok || q.error) return { code: s.code, name: s.name, error: true };
+      if (isFund) return {code: s.code, name: q.name, price: q.latest.nav, pct: q.latest.change_pct, nav_date: q.latest.date};
       return {
         code: s.code, name: knownStockName(s.code, q.name),
         price: q.price, pct: q.pct, volume: q.volume,
@@ -3452,14 +3565,16 @@ async function loadOverview() {
       ${group.stocks.sort((a, b) => (b.pct ?? -Infinity) - (a.pct ?? -Infinity)).map(s => {
     const pctCls = s.pct > 0 ? 'up' : s.pct < 0 ? 'down' : 'flat';
     const pctStr = s.pct != null ? (s.pct > 0 ? '+' : '') + s.pct.toFixed(2) + '%' : '--';
-    const sigTag = s.action ? `<span class="wp-ov-sig-tag ${s.action === '买入' ? 'buy' : s.action === '卖出' ? 'sell' : 'watch'}">${s.action}</span>` : '<span class="wp-ov-sig-tag none">--</span>';
-    const scoreStr = s.score ? s.score : '--';
-    const scoreColor = s.score >= 60 ? C.up : s.score >= 40 ? '#ffc107' : s.score > 0 ? C.down : '#666';
-    return `<div class="wp-ov-item" onclick="analyze('${s.code}');closePanel()">
+    const isFund = group.type === 'fund';
+    const sigTag = isFund ? `<span class="wp-ov-sig-tag none">${s.error ? '获取失败' : escHtml(s.nav_date)}</span>`
+      : s.action ? `<span class="wp-ov-sig-tag ${s.action === '买入' ? 'buy' : s.action === '卖出' ? 'sell' : 'watch'}">${s.action}</span>` : '<span class="wp-ov-sig-tag none">--</span>';
+    const scoreStr = isFund ? (s.price == null ? '--' : s.price.toFixed(4)) : s.score ? s.score : '--';
+    const scoreColor = isFund ? C.text : s.score >= 60 ? C.up : s.score >= 40 ? '#ffc107' : s.score > 0 ? C.down : '#666';
+    return `<div class="wp-ov-item${isFund ? ' fund-overview' : ''}" onclick="analyze('${s.code}');closePanel()">
       <span class="wp-ov-code">${s.code}</span>
       <span class="wp-ov-name">${escHtml(s.name)}</span>
       <span class="wp-ov-pct ${pctCls}" title="${s.stale ? '旧数据，最后成功获取 ' + formatDataTime(s.fetched_at) : ''}">${pctStr}${s.stale ? '（旧）' : ''}</span>
-      <span class="wp-ov-score" style="color:${scoreColor}">${scoreStr}</span>
+      <span class="wp-ov-score" style="color:${scoreColor}" title="${isFund ? '单位净值' : '评分'}">${scoreStr}</span>
       <span class="wp-ov-sig">${sigTag}</span>
     </div>`;
       }).join('')}

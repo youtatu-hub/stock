@@ -6,12 +6,14 @@ API端口：8795  |  看板端口：同端口（/ → index.html）
 API：
   GET /api/analyze?symbol=600000          全量分析
   GET /api/quote?symbol=600000            实时行情
+  GET /api/fund?symbol=050025             场外基金净值与趋势
   GET /api/search?keyword=贵州             搜索股票
   GET /api/kline?symbol=600000&count=250  K线数据
 """
 from __future__ import annotations
 
 import json
+import re
 import hashlib
 import sys
 import os
@@ -35,11 +37,13 @@ from data.kline_fetcher import (
 )
 from data.market_breadth import market_breadth_cache
 from data.fund_flow_service import history_status, serialize_history, realtime_flow_service
+from data.fund_nav import fetch_fund_nav
 from data.request_runtime import collect_stages, fetch_required, request_id
 from analysis.signal_engine import run_analysis, SignalEngineResult
 from analysis.signal_policy import apply_signal_optimization as _apply_signal_optimization
 from analysis.chanlun_minute import analyze_chanlun_minute, signals_to_dict
 from analysis.chanlun_daily import analyze_chanlun_daily, daily_result_to_dict
+from analysis.fund_nav import analyze_fund_nav
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("trend_app")
@@ -318,6 +322,14 @@ def handle_quote(params: dict) -> dict:
         return {"error": "缺少symbol参数"}
     q = fetch_required("quote", lambda: fetch_quote(symbol))
     return quote_to_dict(q) if q else {"error": "获取行情失败"}
+
+
+def handle_fund(params: dict) -> dict:
+    symbol = params.get("symbol", [""])[0].strip()
+    if not re.fullmatch(r"[0-9]{6}", symbol):
+        return {"error": "基金代码必须为 6 位数字"}
+    data = fetch_required("fund_nav", lambda: fetch_fund_nav(symbol))
+    return {**data, **analyze_fund_nav(data["history"])}
 
 
 def handle_search(params: dict) -> dict:
@@ -737,6 +749,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(market_breadth_cache.snapshot())
                 elif path == "/api/quote":
                     self._json(handle_quote(params))
+                elif path == "/api/fund":
+                    result = handle_fund(params)
+                    self._json(result, 400 if "error" in result else 200)
                 elif path == "/api/search":
                     self._json(handle_search(params))
                 elif path == "/api/kline":
