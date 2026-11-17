@@ -726,7 +726,14 @@ body {
         </div>
         <div id="flow-meta"></div>
         <div id="flow-chart"></div>
-        <div id="flow-details"></div>
+        <div id="flow-details" hidden>
+          <details id="flow-details-toggle">
+            <summary id="flow-details-title"></summary>
+            <div id="flow-details-scroll" style="max-height:160px;overflow:auto">
+              <table><thead id="flow-details-head"></thead><tbody id="flow-details-rows"></tbody></table>
+            </div>
+          </details>
+        </div>
       </div>
       <div class="loading-overlay" id="loading"><div class="spinner"></div></div>
       <div id="signal-tooltip"></div>
@@ -1755,10 +1762,21 @@ const FLOW_COLUMNS = [
 
 function renderFlowDetails(flows, realtime = false) {
   const el = document.getElementById('flow-details');
-  if (!flows || !flows.length) { el.textContent = ''; return; }
-  el.innerHTML = `<details><summary>查看${realtime ? '分时累计明细' : '逐日数值'}（${flows.length}条，单位：万元）</summary>
-    <div style="max-height:160px;overflow:auto"><table><thead><tr><th>${realtime ? '时间' : '日期'}</th>${FLOW_COLUMNS.map(([, label]) => `<th>${label}净额</th>`).join('')}</tr></thead>
-    <tbody>${flows.map(f => `<tr><td>${escHtml(realtime ? f.time : f.date)}</td>${FLOW_COLUMNS.map(([key]) => `<td>${Number.isFinite(f[key]) ? (f[key] / 1e4).toFixed(2) : '未提供'}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
+  el.hidden = !flows?.length;
+  if (el.hidden) return;
+  const scroll = document.getElementById('flow-details-scroll');
+  const scrollTop = scroll.scrollTop;
+  document.getElementById('flow-details-title').textContent = `查看${realtime ? '分时累计明细' : '逐日数值'}（${flows.length}条，单位：万元）`;
+  document.getElementById('flow-details-head').innerHTML = `<tr><th>${realtime ? '时间' : '日期'}</th>${FLOW_COLUMNS.map(([, label]) => `<th>${label}净额</th>`).join('')}</tr>`;
+  document.getElementById('flow-details-rows').innerHTML = flows.map(f => `<tr><td>${escHtml(realtime ? f.time : f.date)}</td>${FLOW_COLUMNS.map(([key]) => `<td>${Number.isFinite(f[key]) ? (f[key] / 1e4).toFixed(2) : '未提供'}</td>`).join('')}</tr>`).join('');
+  scroll.scrollTop = scrollTop;
+}
+
+function resetFlowDetails() {
+  document.getElementById('flow-details').hidden = true;
+  document.getElementById('flow-details-toggle').open = false;
+  document.getElementById('flow-details-scroll').scrollTop = 0;
+  document.getElementById('flow-details-rows').textContent = '';
 }
 
 function showFlowState(title, hint = '') {
@@ -1817,7 +1835,8 @@ function switchFlowMode(mode) {
   document.getElementById('ft-rt').classList.toggle('ft-active', mode === 'realtime');
   document.getElementById('ft-daily').classList.toggle('ft-active', mode === 'daily');
   flowChart.clear();
-  for (const id of ['flow-summary', 'flow-meta', 'flow-details']) document.getElementById(id).textContent = '';
+  for (const id of ['flow-summary', 'flow-meta']) document.getElementById(id).textContent = '';
+  resetFlowDetails();
   if (mode === 'realtime') {
     showFlowState('正在获取分时资金流…');
     loadRealtimeFlow(currentSymbol, true);
@@ -1869,7 +1888,7 @@ async function loadRealtimeFlow(symbol, force = false) {
     showFlowState('正在获取分时资金流…', '最多等待10秒');
     document.getElementById('flow-summary').textContent = '正在刷新';
     document.getElementById('flow-meta').textContent = '';
-    document.getElementById('flow-details').textContent = '';
+    renderFlowDetails([]);
   }
   let retrySeconds = 30;
   let data;
@@ -1895,10 +1914,10 @@ async function loadRealtimeFlow(symbol, force = false) {
 
 function renderRealtimeFlow(data) {
   const fs = document.getElementById('flow-summary');
-  document.getElementById('flow-details').textContent = '';
   const retrySeconds = data.retry_after_seconds || 30;
   const nextTime = new Date(Date.now() + retrySeconds * 1000).toLocaleTimeString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
   if (data.error || !data.flows?.length) {
+    renderFlowDetails([]);
     fs.textContent = data.status === 'unavailable' ? '分时资金流暂无记录' : '分时资金流获取失败';
     document.getElementById('flow-meta').textContent = `${data.session_note ? data.session_note + '；' : ''}${data.message || data.error || '数据源未提供记录'}；本次检查 ${formatDataTime(data.checked_at)}；下次自动尝试 ${nextTime}（北京时间）`;
     showFlowState(fs.textContent, '可点击“重新获取”，或切换“近30日”查看历史数据');
@@ -2089,7 +2108,7 @@ function renderSignal(signal) {
   renderSummary(signal);
   if (signal.input_snapshot) {
     const input = signal.input_snapshot;
-    document.getElementById('sum-body').insertAdjacentHTML('beforeend', `<div style="font-size:11px;color:#888;margin-top:6px">${input.status === 'provisional' ? '暂定评分（部分输入缺失）' : '评分输入'}：K线截至 ${escHtml(input.kline_through)}，日级资金流截至 ${escHtml(input.flow_through || '缺失')}。${escHtml(input.basis)}</div>`);
+    document.getElementById('sum-body').insertAdjacentHTML('beforeend', `<div style="font-size:11px;color:#888;margin-top:6px">${input.status === 'provisional' ? '暂定评分（部分输入缺失或未更新）' : '评分输入'}：K线截至 ${escHtml(input.kline_through)}${input.kline_stale ? '（最近成功快照，本次刷新未取得同等日期的新结果）' : ''}，日级资金流截至 ${escHtml(input.flow_through || '缺失')}。${escHtml(input.basis)}</div>`);
   }
 
   // 操作计划
@@ -2391,7 +2410,7 @@ function markQuoteFailure(error) {
 }
 
 function updateKlineStatus(status = {}) {
-  setStageStatus('kline', 'K 线', `截至 ${status.last_bar || '未知'}；获取 ${formatDataTime(status.fetched_at)}`);
+  setStageStatus('kline', 'K 线', `截至 ${status.last_bar || '未知'}；获取 ${formatDataTime(status.fetched_at)}${status.source ? ' · ' + status.source : ''}${status.stale ? '；刷新未取得同等日期的新结果，保留最近成功快照：' + (status.refresh_error || '') : ''}`, !!status.stale);
 }
 
 function fmtVol(v) {
@@ -2479,7 +2498,7 @@ function clearAnalysisPanels() {
 function renderAnalysisStatus(session) {
   const data = session.analysisData;
   if (!data || session.analysisRefreshing) return;
-  const labels = {quote: '报价', fund_flow: '日级资金流', index: '大盘指数', kline_extras: '成交额/换手率', breadth: '市场宽度'};
+  const labels = {quote: '报价', kline: 'K线', fund_flow: '日级资金流', index: '大盘指数', kline_extras: '成交额/换手率', breadth: '市场宽度'};
   const errors = Object.entries(data.degraded || {}).filter(([stage]) => stage !== 'quote' || !session.quoteReady);
   const note = errors.map(([stage, reason]) => `${labels[stage] || stage}：${reason}`).join('；');
   setStageStatus('analysis', '分析', `已完成 ${formatDataTime(data.analyzed_at)}${note ? '（本次数据降级） ' + note : ''}`, !!note);
@@ -2508,9 +2527,10 @@ async function analyze(symbol) {
   _lastQuote = readQuoteSnapshot(symbol);
   clearAnalysisPanels();
   for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) chart.clear();
-  for (const id of ['module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid', 'sa-stats', 'sa-detail', 'flow-summary', 'flow-meta', 'flow-details']) {
+  for (const id of ['module-list', 'sig-list', 'cs-grid', 'cs-simple', 'kl-grid', 'sa-stats', 'sa-detail', 'flow-summary', 'flow-meta']) {
     document.getElementById(id).textContent = '';
   }
+  resetFlowDetails();
   for (const id of ['plan-card', 'market-card', 'risk-card', 'chanlun-card']) {
     document.getElementById(id).style.display = 'none';
   }

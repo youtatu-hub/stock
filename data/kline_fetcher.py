@@ -298,21 +298,6 @@ def _get_flow_json(path: str, params: dict, hosts: List[str]) -> dict:
     raise OSError("；".join(errors) or "资金流数据源不可用")
 
 
-def _is_etf(symbol: str) -> bool:
-    """判断是否为ETF/LOF基金。5开头=沪市ETF，1开头(非000/002/300)=深市ETF/LOF，159开头=深市ETF。"""
-    s = symbol.strip().zfill(6)
-    # 沪市：5开头(ETF/LOF)
-    if s.startswith("5"):
-        return True
-    # 深市：159开头(ETF)、18开头(封闭式基金)
-    if s.startswith(("159", "18")):
-        return True
-    # 深市：1开头但非A股(000/002/003/300)
-    if s.startswith("1") and not s.startswith(("000", "002", "003", "100", "110", "120", "130", "140", "150", "160", "170", "180", "200", "300")):
-        return True
-    return False
-
-
 # ---- 代码转换 ----
 def symbol_to_secid(symbol: str) -> str:
     symbol = str(symbol).strip().zfill(6)
@@ -344,13 +329,17 @@ class Kline:
     pct: float = 0.0  # 涨跌幅(%)
     turnover: float = 0.0  # 换手率(%)
     fetched_at: str = ""
+    source: str = ""
+    stale: bool = False
+    refresh_error: str = ""
 
 
 def exclude_preopen_bar(klines: List[Kline]) -> List[Kline]:
+    """盘前不采用当日日K；开盘后仍排除没有成交的当日占位行。"""
     session = flow_session_status()
     if session["session_state"] == "preopen":
         return [k for k in klines if k.date < session["market_date"]]
-    return klines
+    return [k for k in klines if k.date != session["market_date"] or k.volume > 0]
 
 
 def fetch_kline(symbol: str, count: int = 250, period: str = "day", adjust: str = "qfq",
@@ -370,35 +359,12 @@ def enrich_klines(klines: List[Kline], extras: dict) -> List[Kline]:
             if k.date in extras else k for k in klines]
 
 
-@data_stage
-def _fetch_price_klines(symbol: str, count: int, period: str, adjust: str) -> List[Kline]:
-    cache_key = f"kline_{symbol}_{count}_{period}_{adjust}"
-    cached = _cached(cache_key)
-    if cached:
-        return cached
+KLINE_SNAPSHOT_TTL_SECONDS = 15 * 60
+KLINE_SOURCE_BUDGET_SECONDS = 2.5
 
-    klines: List[Kline] = []
 
-    # 1. 优先腾讯API（前复权，价格准确）
-    klines = _fetch_kline_tencent(symbol, count, period, adjust)
-    if klines:
-        log.debug(f"腾讯K线成功 {symbol}: {len(klines)}条")
-    else:
-        # 2. 腾讯失败(可能WAF拦截) → 新浪API（不复权但价格准确）
-        klines = _fetch_kline_sina(symbol, count, period)
-        if klines:
-            log.debug(f"新浪K线成功 {symbol}: {len(klines)}条")
-        else:
-            # 3. 最后fallback东财push2test
-            klines = _fetch_kline_eastmoney(symbol, count, period)
-            if klines:
-                log.debug(f"东财K线成功 {symbol}: {len(klines)}条")
-
-    if not klines or len(klines) < 10:
-        log.error(f"所有K线源均失败 {symbol}, 获取{len(klines)}条")
-        return klines if klines else []
-
-    # 数据校验：过滤异常价格（价格<0或>10000的可能是脏数据）
+def _valid_price_klines(klines: List[Kline], period: str) -> List[Kline]:
+    """先校验、排除占位行，再判断来源是否覆盖最新交易日。"""
     valid_klines = []
     for k in klines:
         if k.close > 0 and k.high > 0 and k.low > 0 and k.open > 0:
@@ -407,14 +373,51 @@ def _fetch_price_klines(symbol: str, count: int, period: str, adjust: str) -> Li
                     if k.close < 10000:  # 合理价格上限
                         valid_klines.append(k)
                         continue
-        log.warning(f"异常K线数据被过滤 {symbol} {k.date}: O={k.open} H={k.high} L={k.low} C={k.close}")
-    if len(valid_klines) < len(klines):
-        log.warning(f"过滤{len(klines)-len(valid_klines)}条异常K线 {symbol}")
-    fetched_at = utc_now()
-    klines = [replace(kline, fetched_at=fetched_at) for kline in valid_klines]
+        log.warning("异常K线数据被过滤 date=%s O=%s H=%s L=%s C=%s", k.date, k.open, k.high, k.low, k.close)
+    valid_klines.sort(key=lambda k: k.date)
+    return exclude_preopen_bar(valid_klines) if period == "day" else valid_klines
 
-    _set_cache(cache_key, klines)
-    return klines
+
+@data_stage
+def _fetch_price_klines(symbol: str, count: int, period: str, adjust: str) -> List[Kline]:
+    cache_key = f"kline_{symbol}_{count}_{period}_{adjust}"
+    cached = _cached(cache_key)
+    if cached:
+        return cached
+    previous = _cache_get(cache_key, KLINE_SNAPSHOT_TTL_SECONDS) or []
+    previous = _valid_price_klines(previous, period)
+    latest_known = previous or _valid_price_klines(_cache_get(cache_key, float("inf")) or [], period)
+    failures = []
+    # 东财含盘中日K；新浪可能仅到上一交易日，不能直接覆盖已取得的新结果。
+    sources = (
+        ("腾讯", lambda: _fetch_kline_tencent(symbol, count, period, adjust)),
+        ("东方财富", lambda: _fetch_kline_eastmoney(symbol, count, period)),
+        ("新浪", lambda: _fetch_kline_sina(symbol, count, period)),
+    )
+    for source, fetcher in sources:
+        try:
+            with deadline_scope(time.monotonic() + KLINE_SOURCE_BUDGET_SECONDS):
+                klines = _valid_price_klines(fetcher(), period)
+        except (requests.RequestException, OSError, ValueError) as exc:
+            failures.append(f"{source}：{exc}")
+            continue
+        if not klines:
+            failures.append(f"{source}未返回有效K线")
+            continue
+        if latest_known and klines[-1].date < latest_known[-1].date:
+            failures.append(f"{source}仅截至{klines[-1].date}，早于已取得的{latest_known[-1].date}")
+            continue
+        fetched_at = utc_now()
+        klines = [replace(k, fetched_at=fetched_at, source=source) for k in klines]
+        _set_cache(cache_key, klines)
+        return klines
+
+    reason = "；".join(failures)
+    log.warning("kline_refresh_failed symbol=%s reason=%s", symbol, reason)
+    if previous:
+        # 不刷新成功快照的时间、不拼接两家历史，也不伪造今天的K线。
+        return [replace(k, stale=True, refresh_error=reason) for k in previous]
+    raise OSError(f"K线暂不可用：{reason}")
 
 
 def _fetch_kline_tencent(symbol: str, count: int, period: str, adjust: str) -> List[Kline]:
@@ -458,9 +461,7 @@ def _fetch_kline_tencent(symbol: str, count: int, period: str, adjust: str) -> L
             if len(row) >= 6:
                 vol_raw = row[5]
                 vol = float(vol_raw) if isinstance(vol_raw, (str, int, float)) else 0.0
-                # 腾讯K线volume：A股单位=手，ETF单位=份。统一存原始值
-                # A股: vol=65181(手), 前端fmtVol→"6.5万手"
-                # ETF: vol=97721858(份), 前端fmtVol→"9772万份"
+                # 腾讯股票和ETF的K线成交量均以手计。
                 k = Kline(
                     date=str(row[0]),
                     open=float(row[1]),
@@ -515,13 +516,8 @@ def _fetch_kline_sina(symbol: str, count: int, period: str) -> List[Kline]:
             v = _to_float(item.get("volume"))
             if None in (o, c, h, lo) or not d:
                 continue
-            # 新浪volume：A股单位=股，ETF单位=份
-            # A股: 7714770(股) → ÷100 = 77147.7(手)，和腾讯单位一致
-            # ETF: 9965596311(份) → 直接存(份)，和腾讯单位一致
-            if _is_etf(symbol):
-                vol = v if v else 0.0  # ETF份直接存
-            else:
-                vol = v / 100.0 if v else 0.0  # A股股→手
+            # 新浪股票单位为股、基金为份；统一换算为手，与腾讯/东财一致。
+            vol = v / 100.0 if v else 0.0
             k = Kline(date=d, open=o, close=c, high=h, low=lo, volume=vol)
             if klines:
                 k.pct = round((k.close - klines[-1].close) / klines[-1].close * 100, 2)

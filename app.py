@@ -197,7 +197,9 @@ def signal_to_dict(r: SignalEngineResult) -> dict:
 def _kline_status(klines: list, period: str) -> dict:
     last = klines[-1] if klines else None
     return {"last_bar": last.date if last else None,
-            "fetched_at": last.fetched_at if last else None, "period": period}
+            "fetched_at": last.fetched_at if last else None, "period": period,
+            "source": last.source if last else None, "stale": bool(last and last.stale),
+            "refresh_error": last.refresh_error if last else ""}
 
 
 def _analysis_inputs(klines, flows, index_klines, breadth, degraded):
@@ -210,12 +212,15 @@ def _analysis_inputs(klines, flows, index_klines, breadth, degraded):
     }
     fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:12]
     missing = []
+    if klines[-1].stale:
+        missing.append("kline")
     if not flows or "fund_flow" in degraded:
         missing.append("fund_flow")
     if len(index_klines or []) < 60 or "index" in degraded:
         missing.append("index")
     return {"id": fingerprint, "status": "provisional" if missing else "complete",
             "missing": missing, "kline_through": klines[-1].date,
+            "kline_stale": klines[-1].stale, "kline_source": klines[-1].source,
             "flow_through": flows[-1].date if flows else None,
             "index_through": index_klines[-1].date if index_klines else None,
             "basis": "价格、成交量使用同一K线快照；相同输入得到相同评分，盘中K线或资金流变化会重算"}
@@ -241,7 +246,10 @@ def handle_analyze(params: dict) -> dict:
     if len(klines) < 30:
         return {"error": degraded.get("kline", f"K线数据不足: {len(klines)}条"),
                 "degraded": degraded, "timings_ms": timings}
-    klines = enrich_klines(klines, data.get("kline_extras", {}))
+    if klines[-1].stale:
+        degraded["kline"] = f"K线刷新未取得同等日期的新结果，使用最近成功快照（{klines[-1].fetched_at}）"
+    else:
+        klines = enrich_klines(klines, data.get("kline_extras", {}))
     quote = data.get("quote")
     if quote and quote.stale:
         degraded["quote"] = f"实时报价刷新失败，显示最近成功报价（{quote.fetched_at}）"
@@ -338,7 +346,9 @@ def handle_kline(params: dict) -> dict:
     }, required=("kline",))
     if "kline" not in data:
         return {"error": degraded["kline"], "klines": [], "timings_ms": timings}
-    klines = enrich_klines(data["kline"], data.get("kline_extras", {}))
+    klines = data["kline"]
+    if not klines[-1].stale:
+        klines = enrich_klines(klines, data.get("kline_extras", {}))
     return {"klines": [kline_to_dict(k) for k in klines], "degraded": degraded, "timings_ms": timings,
             "kline_status": _kline_status(klines, period)}
 

@@ -24,7 +24,7 @@ function setup() {
     currentSymbol:'999999', currentView:'dayk', API:'', flowChart:chart,
     StockLoadSession:Request, C:{up:'red',down:'green',textDim:'#888'},
     escHtml:value=>String(value), formatDataTime:value=>value || '未知',
-    document:{getElementById(id) {if(!nodes.has(id)) nodes.set(id,{textContent:'',innerHTML:'',classList:{toggle(){}}});return nodes.get(id);}},
+    document:{getElementById(id) {if(!nodes.has(id)) nodes.set(id,{textContent:'',innerHTML:'',open:false,hidden:true,scrollTop:0,classList:{toggle(){}}});return nodes.get(id);}},
     setTimeout:(callback, delay)=>{timers.set(++timerId,{callback,delay});return timerId;},
     clearTimeout:id=>timers.delete(id),
   });
@@ -64,7 +64,7 @@ test('日级合计带日期范围，展示滞后交易日、获取时间和逐�
   page.run("_renderDailyFlow([{date:'2026-11-11',main_net:20000,super_large_net:10000},{date:'2026-11-12',main_net:-5000,super_large_net:-3000}],{fetched_at:'2026-11-16T13:00:00Z'})");
   assert.match(page.nodes.get('flow-summary').innerHTML, /最近2个资金流交易日.*2026-11-11~2026-11-12/);
   assert.match(page.nodes.get('flow-meta').textContent, /截至 2026-11-12.*获取.*缺少最近2个交易日/);
-  assert.match(page.nodes.get('flow-details').innerHTML, /2026-11-12.*-0.50.*-0.30/);
+  assert.match(page.nodes.get('flow-details-rows').innerHTML, /2026-11-12.*-0.50.*-0.30/);
 });
 
 test('实时图显示实际来源和统计口径，切源时整组替换', () => {
@@ -92,8 +92,45 @@ test('盘前说明、五类资金和分时明细同时展示', () => {
   assert.match(page.nodes.get('flow-meta').textContent, /今日尚未进入连续交易/);
   assert.match(page.nodes.get('flow-meta').textContent, /主力净额 = 超大单净额 \+ 大单净额/);
   assert.match(page.nodes.get('flow-summary').innerHTML, /大单.*\+6.89亿.*中单.*小单/);
-  assert.match(page.nodes.get('flow-details').innerHTML, /分时累计明细.*15:00.*68900\.00/s);
+  assert.match(page.nodes.get('flow-details-title').textContent, /分时累计明细/);
+  assert.match(page.nodes.get('flow-details-rows').innerHTML, /15:00.*68900\.00/s);
   assert.equal(page.chart.option.series.length, 5);
+});
+
+test('展开分时明细后自动刷新保留展开和滚动位置，表内数值继续更新', async () => {
+  const page = setup();
+  page.run("switchFlowMode('realtime')");
+  const payload = net => ({status:'ok',source:'腾讯',data_date:'2026-11-17',is_today:true,
+    fetched_at:new Date().toISOString(),retry_after_seconds:10,
+    flows:[{time:'10:15',main_net:net}],summary:{main_net:net}});
+  page.pending[0].resolve(payload(10000));
+  await new Promise(setImmediate);
+  const disclosure = page.nodes.get('flow-details-toggle');
+  disclosure.open = true;
+  page.nodes.get('flow-details-scroll').scrollTop = 60;
+  [...page.timers.values()][0].callback();
+  page.pending[1].resolve(payload(20000));
+  await new Promise(setImmediate);
+  assert.equal(page.nodes.get('flow-details-toggle'), disclosure);
+  assert.equal(disclosure.open, true);
+  assert.equal(page.nodes.get('flow-details-scroll').scrollTop, 60);
+  assert.equal(page.nodes.get('flow-details').hidden, false);
+  assert.match(page.nodes.get('flow-details-rows').innerHTML, /10:15.*2\.00/);
+  page.run("switchFlowMode('daily')");
+  assert.equal(disclosure.open, false);
+});
+
+test('日级分析刷新保留明细展开，暂时无记录后恢复也不重建折叠控件', () => {
+  const page = setup();
+  page.run("resetFlowDetails(); renderFlowDetails([{date:'2026-11-16',main_net:10000}])");
+  page.nodes.get('flow-details-toggle').open = true;
+  page.run("_renderDailyFlow([{date:'2026-11-16',main_net:20000}])");
+  assert.equal(page.nodes.get('flow-details-toggle').open, true);
+  page.run('renderFlowDetails([])');
+  assert.equal(page.nodes.get('flow-details').hidden, true);
+  page.run("renderFlowDetails([{date:'2026-11-16',main_net:30000}])");
+  assert.equal(page.nodes.get('flow-details-toggle').open, true);
+  assert.match(page.nodes.get('flow-details-rows').innerHTML, /3\.00/);
 });
 
 test('分析刷新清空旧风险；报价恢复后历史报价故障不再作为当前故障', () => {
