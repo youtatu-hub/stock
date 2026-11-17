@@ -750,7 +750,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if path == "/api/health":
                     self._json({"status": "ok", "time": time.strftime("%H:%M:%S"),
-                                "flow_api_version": 3})
+                                "flow_api_version": 4, "flow_sources": ["腾讯", "东方财富"]})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))
                 elif path == "/api/market_breadth":

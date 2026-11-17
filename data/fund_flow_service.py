@@ -65,7 +65,8 @@ class RealtimeFlowService:
             last = flows[-1]
             payload = {
                 "symbol": symbol, "status": "ok", "stale": False,
-                "source": "东方财富", "checked_at": checked_at,
+                "source": last.source, "checked_at": checked_at,
+                "source_note": f"按{last.source}口径统计，不同来源的资金流金额可能有差异",
                 "fetched_at": last.fetched_at or checked_at,
                 "data_date": last.date or None,
                 "as_of": f"{last.date} {last.time}".strip(),
@@ -88,7 +89,7 @@ class RealtimeFlowService:
             else:
                 good = None
                 payload = {"symbol": symbol, "status": "error" if message else "unavailable",
-                           "flows": [], "source": "东方财富", "message": reason,
+                           "flows": [], "source": "腾讯 / 东方财富", "message": reason,
                            "checked_at": checked_at, "fetched_at": None, "as_of": None}
         payload["retry_after_seconds"] = retry_seconds
         with self._lock:

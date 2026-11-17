@@ -1,4 +1,4 @@
-"""数据层：K线(腾讯+东财补充) + 实时行情(腾讯/东财) + 资金流和搜索(东财)。
+"""数据层：K线、实时报价及分时资金流优先腾讯，东财补充历史资金流和搜索。
 
 参考《A股资金流向监控工具-个股增强版》的host池轮换、fltt=2、session复用设计。
 
@@ -6,7 +6,8 @@
 - K线价格/成交量：腾讯API前复权（价格准确，和行情一致）
 - K线成交额/换手率：东财K线API（有值，按日期匹配补充）
 - 实时行情：腾讯报价优先，东方财富独立回退；失败保留有时限的成功快照
-- 资金流：东财fflow/daykline（push2his优先，push2test备选）
+- 分时资金流：腾讯hsfundtab优先，东方财富fflow/kline独立回退
+- 日级资金流：东财fflow/daykline（push2his优先，push2test备选）
 """
 from __future__ import annotations
 
@@ -100,6 +101,8 @@ HIS_HOSTS = [
 SEARCH_HOST = "https://searchapi.eastmoney.com"
 TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 TENCENT_QUOTE = "https://qt.gtimg.cn/"
+TENCENT_FLOW = "https://proxy.finance.qq.com/cgi/cgi-bin/fundflow/hsfundtab"
+FLOW_PRIMARY_BUDGET_SECONDS = 3.0
 QUOTE_SOURCE_BUDGET_SECONDS = 1.2
 QUOTE_STALE_TTL_SECONDS = 15 * 60
 QUOTE_RETRY_SECONDS = 10
@@ -801,20 +804,82 @@ class MinuteFlow:
     super_large_net: float  # 累计超大单净流入(元)
     date: str = ""
     fetched_at: str = ""
+    source: str = "东方财富"
 
 
 @data_stage
 def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
-    """盘中实时分时资金流。东财fflow/kline/get，走push2delay，klt=1(1分钟)。
-
-    返回当日所有1分钟K线的累计资金流，最后一根即为当日总净流入。
-    数据源未提供记录时返回空列表；请求失败单独报错。
-    """
+    """腾讯优先、东财备用；每次只采用一个来源的完整分钟累计序列。"""
     cache_key = f"rt_flow_{symbol}"
     cached = _cache_get(cache_key, _RT_CACHE_TTL)
     if cached is not None:
         return cached
 
+    failures, unavailable = [], []
+    sources = (
+        ("腾讯", _fetch_realtime_flow_tencent, FLOW_PRIMARY_BUDGET_SECONDS),
+        ("东方财富", _fetch_realtime_flow_eastmoney, HTTP_ATTEMPT_SECONDS),
+    )
+    for source, fetcher, budget in sources:
+        try:
+            with deadline_scope(time.monotonic() + budget):
+                flows = fetcher(symbol)
+            if flows:
+                flows.sort(key=lambda flow: (flow.date, flow.time))
+                latest_date = flows[-1].date
+                if latest_date:
+                    flows = [flow for flow in flows if flow.date == latest_date]
+                _cache_set(cache_key, flows)
+                return flows
+            unavailable.append(f"{source}未提供该品种的分时资金流记录")
+        except (requests.RequestException, OSError, ValueError) as exc:
+            reason = _source_error(exc) if isinstance(exc, requests.RequestException) else str(exc)
+            failures.append(f"{source}：{reason}")
+            log.warning("flow_source_failed symbol=%s source=%s error=%s", symbol, source, exc)
+    if failures:
+        raise OSError("；".join(failures + unavailable))
+    _cache_set(cache_key, [])
+    return []
+
+
+def _fetch_realtime_flow_tencent(symbol: str) -> List[MinuteFlow]:
+    code = f"bj{symbol}" if symbol.startswith("920") else symbol_to_tencent(symbol)
+    response = _http_get(TENCENT_FLOW, params={"code": code, "type": "todayFundTrend"}).json()
+    if (not isinstance(response, dict) or response.get("code") != 0
+            or not isinstance(response.get("data"), dict)):
+        raise ValueError("资金流接口未返回有效数据")
+    trend = response["data"].get("todayFundTrend")
+    if trend is None:
+        return []
+    if not isinstance(trend, dict) or trend.get("stockCode") != code:
+        raise ValueError("资金流品种与请求不一致")
+    rows = trend.get("minList")
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ValueError("分时资金流记录格式无效")
+    fetched_at = utc_now()
+    flows = []
+    fields = {"main_net": "MainNetInflow", "super_large_net": "SuperNetInflow",
+              "large_net": "BigNetInflow", "medium_net": "NormalNetInflow",
+              "small_net": "SmallNetInflow"}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("分时资金流记录格式无效")
+        stamp = row.get("time")
+        if not isinstance(stamp, str) or len(stamp) != 12 or not stamp.isdigit():
+            raise ValueError("分时资金流日期格式无效")
+        moment = datetime.strptime(stamp, "%Y%m%d%H%M")
+        amounts = {name: _to_float(row.get(field)) for name, field in fields.items()}
+        if any(value is None or not math.isfinite(value) for value in amounts.values()):
+            raise ValueError("分时资金流金额缺失或无效")
+        # 上游字段已是累计净额，单位为元；不再次累加，也不混入东财分项。
+        flows.append(MinuteFlow(time=moment.strftime("%H:%M"), date=moment.date().isoformat(),
+                                fetched_at=fetched_at, source="腾讯", **amounts))
+    return flows
+
+
+def _fetch_realtime_flow_eastmoney(symbol: str) -> List[MinuteFlow]:
     secid = symbol_to_secid(symbol)
     params = {
         "klt": "1",  # 1分钟
@@ -829,7 +894,6 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
     if not data or data.get("data") is None:
         raise OSError("实时资金流数据源请求失败或未返回有效响应")
     if not data["data"].get("klines"):
-        _cache_set(cache_key, [])
         return []
 
     flows: List[MinuteFlow] = []
@@ -847,11 +911,6 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
                 date=parts[0].split(" ", 1)[0] if " " in parts[0] else "",
                 fetched_at=data.get("fetched_at", ""),
             ))
-    flows.sort(key=lambda flow: (flow.date, flow.time))
-    if flows and flows[-1].date:
-        latest_date = flows[-1].date
-        flows = [flow for flow in flows if flow.date == latest_date]
-    _cache_set(cache_key, flows)
     return flows
 
 

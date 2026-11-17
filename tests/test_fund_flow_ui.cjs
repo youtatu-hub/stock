@@ -66,3 +66,19 @@ test('日级合计带日期范围，展示滞后交易日、获取时间和逐�
   assert.match(page.nodes.get('flow-meta').textContent, /截至 2026-11-12.*获取.*缺少最近2个交易日/);
   assert.match(page.nodes.get('flow-details').innerHTML, /2026-11-12.*-0.50.*-0.30/);
 });
+
+test('实时图显示实际来源和统计口径，切源时整组替换', () => {
+  const page = setup();
+  page.run(`renderRealtimeFlow({source:'腾讯', source_note:'按腾讯口径统计，不同来源的资金流金额可能有差异',
+    data_date:'2026-11-16', as_of:'2026-11-16 15:00', fetched_at:'2026-11-16T07:00:01Z',
+    flows:[{time:'09:31', main_net:5000, super_large_net:3000},{time:'15:00', main_net:10000, super_large_net:6000}],
+    summary:{main_net:10000, super_large_net:6000}})`);
+  assert.match(page.nodes.get('flow-meta').textContent, /腾讯.*按腾讯口径统计/);
+  assert.equal(page.chart.option.series[0].data[1].value, 0.0001);
+  page.run(`renderRealtimeFlow({source:'东方财富', data_date:'2026-11-16',
+    flows:[{time:'15:00', main_net:-10000, super_large_net:-6000}],
+    summary:{main_net:-10000, super_large_net:-6000}})`);
+  assert.match(page.nodes.get('flow-meta').textContent, /东方财富/);
+  assert.equal(page.chart.option.series[0].data.length, 1);
+  assert.equal(page.chart.option.series[0].data[0].value, -0.0001);
+});

@@ -1893,7 +1893,7 @@ function renderRealtimeFlow(data) {
   fs.innerHTML = `${data.stale ? '[旧数据] ' : ''}${escHtml(data.data_date || '数据日期未提供')}主力累计 <span style="color:${summary.main_net >= 0 ? C.up : C.down};font-weight:bold">${summary.main_net >= 0 ? '+' : ''}${mainNetYi}亿</span> | 超大单 <span style="color:${summary.super_large_net >= 0 ? C.up : C.down};font-weight:bold">${summary.super_large_net >= 0 ? '+' : ''}${superLargeYi}亿</span>`;
   const referenceDate = _klineData.at(-1)?.date;
   const behind = data.data_date && referenceDate && data.data_date < referenceDate;
-  document.getElementById('flow-meta').textContent = `数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '东方财富'}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}`;
+  document.getElementById('flow-meta').textContent = `数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '来源未提供'}${data.source_note ? '；' + data.source_note : ''}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}`;
   const flows = data.flows;
   const mainNet = flows.map(f => +(f.main_net / 1e8).toFixed(4));
   const superLarge = flows.map(f => +(f.super_large_net / 1e8).toFixed(4));

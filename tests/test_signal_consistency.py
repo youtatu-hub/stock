@@ -247,10 +247,12 @@ class DataProvenanceTests(unittest.TestCase):
 
     def test_failed_flow_is_distinct_from_empty_successful_response(self):
         with patch.object(fetcher, "_cache_get", return_value=None), \
+                patch.object(fetcher, "_fetch_realtime_flow_tencent", return_value=[]), \
                 patch.object(fetcher, "_get_flow_json", return_value=None):
             with self.assertRaises(OSError):
                 fetcher.fetch_realtime_flow("999712")
         with patch.object(fetcher, "_cache_get", return_value=None), \
+                patch.object(fetcher, "_fetch_realtime_flow_tencent", return_value=[]), \
                 patch.object(fetcher, "_get_flow_json", return_value={"data": {"klines": []}}):
             self.assertEqual(fetcher.fetch_realtime_flow("999712"), [])
 
