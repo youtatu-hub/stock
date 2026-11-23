@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, timedelta, timezone
 
-from .kline_fetcher import _cache_get, _cache_set, _http_get, utc_now
-from .request_runtime import data_stage
+from .kline_fetcher import (
+    TENCENT_QUOTE, _cache_get, _cache_set, _http_get, _source_error,
+    requests, symbol_to_tencent, utc_now,
+)
+from .request_runtime import data_stage, deadline_scope
 
 PREMIUM_CACHE_SECONDS = 15
+PREMIUM_STALE_SECONDS = 300
+PREMIUM_RETRY_SECONDS = 10
 SNAPSHOT_FRESH_SECONDS = 120
 CHINA_TZ = timezone(timedelta(hours=8))
 SOURCE_URL = "https://push2delay.eastmoney.com/api/qt/ulist.np/get"
@@ -55,31 +61,82 @@ def parse_etf_snapshot(payload: dict, symbol: str) -> dict:
     return {"symbol": symbol, "name": row.get("f14", ""), "price": price, "iopv": iopv,
             "premium_pct": round(premium, 3) if premium is not None else None,
             "data_date": data_date.isoformat(), "quote_time": stamp.isoformat(),
-            "iopv_time": None, "source": "东方财富", "source_url": SOURCE_URL,
+            "iopv_time": None, "iopv_time_status": "unprovided", "source": "东方财富", "source_url": SOURCE_URL,
             "basis": "(同一来源快照价格 ÷ IOPV参考值 − 1) × 100%；正值为溢价，负值为折价。",
-            "note": "来源未提供IOPV独立更新时间；跨境时差和汇率会影响参考值，偏离不等于可实现套利收益。"}
+            "note": "来源未提供IOPV独立更新时间，时效未核验；行情时间与获取时间均不能代替IOPV时间。参考偏离不触发实时提醒。"}
+
+
+def parse_tencent_snapshot(text: str, symbol: str) -> dict:
+    if '=\"' not in text:
+        raise ValueError("腾讯未提供ETF报价")
+    fields = text.split('=\"', 1)[1].split('"', 1)[0].split("~")
+    if len(fields) < 83 or fields[2] != symbol or fields[82] != "CNY":
+        raise ValueError("腾讯ETF代码、币种或参考值字段无效")
+    stamp = datetime.strptime(fields[30], "%Y%m%d%H%M%S").replace(tzinfo=CHINA_TZ)
+    premium = _optional_number(fields[77], "来源溢价率")
+    # 腾讯ETF报价：77溢价率、78 IOPV、81已披露净值；不得把81冒充IOPV。
+    result = parse_etf_snapshot({"data": {"diff": [{
+        "f12": symbol, "f14": fields[1], "f2": fields[3], "f441": fields[78],
+        "f402": -premium if premium is not None else None,
+        "f124": stamp.timestamp(), "f297": stamp.strftime("%Y%m%d"),
+    }]}}, symbol)
+    result.update(source="腾讯", source_url=f"https://gu.qq.com/{symbol_to_tencent(symbol)}")
+    return result
 
 
 def snapshot_status(snapshot: dict, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     age = (now - datetime.fromisoformat(snapshot["quote_time"])).total_seconds()
     fresh = 0 <= age <= SNAPSHOT_FRESH_SECONDS
-    return {**snapshot, "snapshot_fresh": fresh,
-            "status": "unavailable" if snapshot["premium_pct"] is None else "ok" if fresh else "stale",
+    iopv_time = snapshot.get("iopv_time")
+    iopv_age = (now - datetime.fromisoformat(iopv_time)).total_seconds() if iopv_time else None
+    iopv_fresh = iopv_age is not None and 0 <= iopv_age <= SNAPSHOT_FRESH_SECONDS
+    oldest_time = min(datetime.fromisoformat(snapshot["quote_time"]), datetime.fromisoformat(iopv_time)) if iopv_time else datetime.fromisoformat(snapshot["quote_time"])
+    return {**snapshot, "snapshot_fresh": fresh, "iopv_fresh": iopv_fresh,
+            "status": "unavailable" if snapshot["premium_pct"] is None else
+            "stale" if not fresh else "ok" if iopv_fresh else "unverified",
             "age_seconds": max(0, round(age)),
-            "fresh_until": (datetime.fromisoformat(snapshot["quote_time"])
-                            + timedelta(seconds=SNAPSHOT_FRESH_SECONDS)).isoformat(),
-            "alert_eligible": fresh and snapshot["premium_pct"] is not None}
+            "fresh_until": (oldest_time + timedelta(seconds=SNAPSHOT_FRESH_SECONDS)).isoformat(),
+            "alert_eligible": fresh and iopv_fresh and snapshot["premium_pct"] is not None}
 
 
 @data_stage
 def fetch_etf_premium(symbol: str) -> dict:
-    cached = _cache_get(f"etf_premium_{symbol}", PREMIUM_CACHE_SECONDS)
-    if cached is None:
+    key = f"etf_premium_{symbol}"
+    cached = _cache_get(key, PREMIUM_CACHE_SECONDS)
+    if cached is not None:
+        return snapshot_status(cached)
+    previous = _cache_get(key, PREMIUM_STALE_SECONDS)
+    error = _cache_get(key + "_error", PREMIUM_RETRY_SECONDS)
+    if not error:
         params = {"fltt": "2", "secids": f"{1 if symbol.startswith('5') else 0}.{symbol}",
                   "fields": "f12,f14,f2,f124,f297,f402,f441"}
-        payload = _http_get(SOURCE_URL, params=params).json()
-        cached = parse_etf_snapshot(payload, symbol)
-        cached["fetched_at"] = utc_now()
-        _cache_set(f"etf_premium_{symbol}", cached)
-    return snapshot_status(cached)
+        errors = []
+        sources = [("腾讯", TENCENT_QUOTE),
+                   ("东方财富", "https://push2.eastmoney.com/api/qt/ulist.np/get"),
+                   ("东方财富延迟节点", SOURCE_URL)]
+        for source, url in sources:
+            try:
+                with deadline_scope(time.monotonic() + (3 if source == "腾讯" else 2)):
+                    if source == "腾讯":
+                        response = _http_get(url, params={"q": symbol_to_tencent(symbol)})
+                        snapshot = parse_tencent_snapshot(response.content.decode("gb18030"), symbol)
+                    else:
+                        snapshot = parse_etf_snapshot(_http_get(url, params=params).json(), symbol)
+                        snapshot.update(source=source, source_url=url)
+                if snapshot["iopv"] is None:
+                    raise ValueError("未提供IOPV参考值")
+                if previous and snapshot["quote_time"] < previous["quote_time"]:
+                    raise ValueError("返回的参考行情时间倒退")
+                snapshot["fetched_at"] = utc_now()
+                _cache_set(key, snapshot)
+                return snapshot_status(snapshot)
+            except (OSError, ValueError) as exc:
+                reason = _source_error(exc) if isinstance(exc, requests.RequestException) else str(exc)
+                errors.append(f"{source}：{reason}")
+        error = "；".join(errors)
+        _cache_set(key + "_error", error)
+    if previous:
+        return {**snapshot_status(previous), "status": "stale", "stale": True,
+                "alert_eligible": False, "refresh_error": error}
+    raise OSError(error)

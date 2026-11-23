@@ -14,6 +14,10 @@ ASSET_PROFILES = {
     "listed_fund": {"label": "场内基金（未细分）", "model": "reference", "chanlun": False},
     "fund": {"label": "场外联接基金", "model": "nav", "chanlun": False},
 }
+for asset_type, profile in ASSET_PROFILES.items():
+    profile.update(canslim=profile["model"] == "stock",
+                   price_models=profile["model"] in ("stock", "technical") or asset_type == "long_bond_etf",
+                   fund_flow=profile["model"] != "nav")
 
 GROUPS = (
     ("steady", "稳健压舱石"), ("core", "核心进攻"), ("dividend", "红利防御"),
@@ -83,7 +87,9 @@ def get_instrument(symbol: str) -> dict:
         asset_type = "listed_fund" if code.startswith(LISTED_FUND_PREFIXES) else "stock"
         item = {"code": code, "name": "", "asset_type": asset_type, "benchmark": "",
                 "note": "资产类别尚未细分，仅展示价格参考。" if asset_type == "listed_fund" else ""}
-    return {**item, **ASSET_PROFILES[item["asset_type"]]}
+    profile = {**item, **ASSET_PROFILES[item["asset_type"]]}
+    profile["canslim"] = profile["canslim"] or item.get("group") == "core"
+    return profile
 
 
 def instrument_catalog() -> dict:

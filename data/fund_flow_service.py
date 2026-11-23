@@ -66,19 +66,19 @@ class RealtimeFlowService:
         if flows:
             last = flows[-1]
             payload = {
-                "symbol": symbol, "status": "ok", "stale": False,
+                "symbol": symbol, "status": "partial" if any(not row.available for row in flows) else "ok", "stale": False,
                 "source": last.source, "checked_at": checked_at,
                 "source_note": f"按{last.source}口径统计，不同来源的资金流金额可能有差异",
                 "accounting_note": "主力净额 = 超大单净额 + 大单净额",
+                "quality_note": next((flow.quality_note for flow in flows if flow.quality_note), ""),
                 "fetched_at": last.fetched_at or checked_at,
                 "data_date": last.date or None,
                 "as_of": f"{last.date} {last.time}".strip(),
-                "flows": [{"time": flow.time, "main_net": flow.main_net,
-                           "super_large_net": flow.super_large_net, "large_net": flow.large_net,
-                           "medium_net": flow.medium_net, "small_net": flow.small_net} for flow in flows],
-                "summary": {"main_net": last.main_net, "super_large_net": last.super_large_net,
-                            "large_net": last.large_net, "medium_net": last.medium_net,
-                            "small_net": last.small_net},
+                "flows": [{"time": flow.time, "available": flow.available,
+                           **{key: getattr(flow, key) if flow.available else None for key in
+                              ("main_net", "super_large_net", "large_net", "medium_net", "small_net")}} for flow in flows],
+                "summary": {key: getattr(last, key) if last.available else None for key in
+                            ("main_net", "super_large_net", "large_net", "medium_net", "small_net")},
                 "time_range": f"{flows[0].time} ~ {last.time}",
             }
             good, good_at = payload, time.monotonic()

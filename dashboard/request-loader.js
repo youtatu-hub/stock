@@ -13,14 +13,14 @@ class StockLoadSession {
     this.controller.abort();
   }
 
-  async request(url) {
+  async request(url, options = {}) {
     const controller = new AbortController();
     const cancel = () => controller.abort();
     this.controller.signal.addEventListener('abort', cancel, { once: true });
     if (!this.active) cancel();
     const timer = setTimeout(cancel, this.timeoutMs);
     try {
-      const response = await fetch(url, { signal: controller.signal });
+      const response = await fetch(url, { ...options, signal: controller.signal });
       const data = await response.json();
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
       return data;

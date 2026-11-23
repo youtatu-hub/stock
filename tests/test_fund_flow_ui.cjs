@@ -35,6 +35,7 @@ function setup() {
 test('切回实时立即清除旧图；失败显示时间和重试，并独立安排下次请求', async () => {
   const page = setup();
   page.run("switchFlowMode('realtime')");
+  assert.equal(page.nodes.get('flow-heading').textContent, '资金流向 · 今日实时');
   assert.equal(page.chart.option.title.text, '正在获取分时资金流…');
   assert.equal(page.pending[0].timeout, 10000);
   page.pending[0].resolve({status:'error',message:'连接超时',flows:[],checked_at:'2026-11-16T13:00:00Z',retry_after_seconds:30});
@@ -117,6 +118,7 @@ test('展开分时明细后自动刷新保留展开和滚动位置，表内数�
   assert.equal(page.nodes.get('flow-details').hidden, false);
   assert.match(page.nodes.get('flow-details-rows').innerHTML, /10:15.*2\.00/);
   page.run("switchFlowMode('daily')");
+  assert.equal(page.nodes.get('flow-heading').textContent, '资金流向 · 近30日');
   assert.equal(disclosure.open, false);
 });
 

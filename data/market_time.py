@@ -9,7 +9,7 @@ def flow_session_status(data_date=None, now=None):
     today = moment.date().isoformat()
     is_today = data_date == today
     if is_today:
-        state, note = "today", "今日单日累计（截至数据时间）"
+        state, note = "today", "今日实时，数值为当日累计（截至数据时间）"
     elif moment.weekday() >= 5:
         state, note = "weekend", "今日为周末"
     elif moment.time() < time(9, 30):

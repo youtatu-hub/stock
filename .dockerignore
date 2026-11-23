@@ -9,4 +9,5 @@
 *.bat
 *.pdf
 data/*.log
+data/cpa_private.json
 docs/

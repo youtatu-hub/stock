@@ -41,6 +41,7 @@ from data.fund_nav import fetch_fund_nav
 from data.fund_terms import fetch_fund_terms
 from data.etf_premium import fetch_etf_premium
 from data.instruments import get_instrument, instrument_catalog
+from data.ai_client import AIClient
 from data.request_runtime import collect_stages, fetch_required, request_id
 from analysis.signal_engine import run_analysis, SignalEngineResult
 from analysis.signal_policy import apply_signal_optimization as _apply_signal_optimization
@@ -331,11 +332,15 @@ def handle_analyze(params: dict) -> dict:
 def handle_asset_analyze(instrument: dict, period: str) -> dict:
     """场内基金只读取适用输入，不触发个股评分、大盘仓位限制或固定目标价。"""
     symbol = instrument["code"]
-    data, degraded, timings = collect_stages({
+    jobs = {
         "kline": lambda: fetch_kline(symbol, count=250, period=period, enrich=False),
         "quote": lambda: fetch_quote(symbol),
         "kline_extras": lambda: fetch_kline_extras(symbol, count=250, period=period),
-    }, required=("kline",))
+    }
+    if instrument["canslim"]:
+        jobs["index"] = lambda: fetch_index_kline("000001", count=60)
+        jobs["fund_flow"] = lambda: fetch_fund_flow(symbol, days=30)
+    data, degraded, timings = collect_stages(jobs, required=("kline",))
     klines = data.get("kline", [])
     if len(klines) < 30:
         return {"error": degraded.get("kline", f"K线数据不足: {len(klines)}条"), "degraded": degraded}
@@ -346,17 +351,18 @@ def handle_asset_analyze(instrument: dict, period: str) -> dict:
     quote = data.get("quote")
     if quote and quote.stale:
         degraded["quote"] = "报价使用最近成功快照"
-    result = analyze_listed_fund(klines, instrument)
+    flows = sorted((flow for flow in data.get("fund_flow", []) if flow.date <= klines[-1].date), key=lambda flow: flow.date)
+    result = analyze_listed_fund(klines, instrument, data.get("index"), flows)
     signal = signal_to_dict(result)
     signal["input_snapshot"] = {
-        "status": "provisional" if klines[-1].stale else "complete",
+        "status": "provisional" if klines[-1].stale or instrument["canslim"] and (not flows or not data.get("index")) else "complete",
         "kline_through": klines[-1].date, "kline_stale": klines[-1].stale,
-        "basis": "仅以该品种的K线计算价格趋势与区间回撤，不参与个股综合评分。",
+        "basis": "价格趋势与区间回撤按该品种K线计算。核心进攻ETF另提供CAN SLIM技术代理评分，不生成个股交易计划。",
     }
     return {"symbol": symbol, "instrument": instrument, "name": quote.name if quote else instrument["name"],
             "quote": quote_to_dict(quote) if quote else None, "signal": signal,
-            "klines": [kline_to_dict(bar) for bar in klines[-120:]], "flows": [],
-            "flow_status": history_status([]), "market_env": "", "breadth": None,
+            "klines": [kline_to_dict(bar) for bar in klines[-120:]], "flows": serialize_history(flows),
+            "flow_status": history_status(flows, klines, period), "market_env": "", "breadth": None,
             "breadth_status": {}, "kline_status": _kline_status(klines, period),
             "analyzed_at": utc_now(), "degraded": degraded, "timings_ms": timings}
 
@@ -365,7 +371,8 @@ def handle_quote(params: dict) -> dict:
     symbol = params.get("symbol", [""])[0].strip()
     if not symbol:
         return {"error": "缺少symbol参数"}
-    q = fetch_required("quote", lambda: fetch_quote(symbol))
+    # fetch_quote 自带预算和请求合并，不再排进分析/扫描共用的数据线程池。
+    q = fetch_quote(symbol)
     return quote_to_dict(q) if q else {"error": "获取行情失败"}
 
 
@@ -400,18 +407,25 @@ def handle_etf_premium(params: dict) -> dict:
     values, errors, _ = collect_stages({
         "iopv": lambda: fetch_etf_premium(symbol),
         "nav": lambda: fetch_fund_nav(symbol),
-    }, required=("iopv", "nav"))
+        "quote": lambda: fetch_quote(symbol),
+    }, required=("iopv", "nav", "quote"))
     snapshot = values.get("iopv")
     nav = values.get("nav")
+    quote = values.get("quote")
     disclosed = None
     if nav:
         latest = nav["history"][-1]
-        price = snapshot.get("price") if snapshot else None
+        price = quote.price if quote else snapshot.get("price") if snapshot else None
         disclosed = {"value": latest["nav"], "date": latest["date"],
+                     "price": price, "price_time": quote.timestamp if quote else snapshot.get("quote_time") if snapshot else None,
+                     "price_stale": quote.stale if quote else not snapshot or not snapshot.get("snapshot_fresh"),
                      "premium_pct": round((price / latest["nav"] - 1) * 100, 3) if price else None,
                      "source": nav["source"], "source_url": nav["source_url"],
                      "fetched_at": nav["fetched_at"],
                      "basis": "本ETF已披露单位净值，非盘中估值；与当前交易价格可能不在同一时点。"}
+        if snapshot:
+            snapshot = {**snapshot, "nav_deviation_pct": round((snapshot["iopv"] / latest["nav"] - 1) * 100, 3)
+                        if snapshot.get("iopv") is not None else None, "nav_date": latest["date"]}
     result = {"symbol": symbol, "iopv": snapshot, "disclosed_nav": disclosed,
               "status": "partial" if errors else "ok", "errors": errors}
     if not values:
@@ -789,6 +803,33 @@ def handle_scan(params: dict) -> dict:
 
 
 # ---- HTTP Handler ----
+def handle_ai_analysis(body: dict) -> dict:
+    symbol = body.get("symbol", "")
+    period = body.get("period", "day")
+    if not isinstance(symbol, str) or not re.fullmatch(r"[0-9]{6}", symbol) or period not in ("day", "week"):
+        raise ValueError("分析代码必须为6位数字，周期必须为day或week")
+    client = AIClient(body.get("model", ""))
+    if not client.model.strip():
+        raise ValueError("请先选择模型")
+    instrument = get_instrument(symbol)
+    if instrument["model"] == "nav":
+        data = handle_fund({"symbol": [symbol]})
+        context = {**data, "history": data.get("history", [])[-30:], "instrument": instrument}
+    else:
+        data = handle_analyze({"symbol": [symbol], "period": [period]})
+        context = {key: data.get(key) for key in (
+            "symbol", "instrument", "quote", "signal", "analyzed_at", "degraded", "flow_status", "kline_status")}
+        context["recent_klines"] = data.get("klines", [])[-20:]
+        if instrument["asset_type"] == "overseas_etf":
+            context["premium_reference"] = handle_etf_premium({"symbol": [symbol]})
+    if data.get("error"):
+        raise OSError(data["error"])
+    context["period"] = period
+    return {"symbol": symbol, "period": period, "model": client.model,
+            "text": client.analyze(context), "analyzed_at": utc_now(),
+            "data_analyzed_at": data.get("analyzed_at") or data.get("fetched_at")}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 静默日志，避免刷屏
@@ -820,6 +861,42 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path not in ("/api/ai/models", "/api/ai/analyze"):
+            self._json({"error": "未知API"}, 404)
+            return
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+            self._json({"error": "AI 配置仅接受同源请求"}, 403)
+            return
+        try:
+            if self.headers.get_content_type() != "application/json":
+                raise ValueError("请求必须使用 application/json")
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 16384:
+                raise ValueError("请求体大小无效")
+            self.connection.settimeout(10)
+            body = json.loads(self.rfile.read(length))
+            if not isinstance(body, dict):
+                raise ValueError("请求体必须是JSON对象")
+            allowed = set() if path.endswith("/models") else {"symbol", "period", "model"}
+            if set(body) - allowed:
+                raise ValueError("请求包含不支持的字段；CPA连接由后端配置")
+            result = AIClient().models() if path.endswith("/models") else handle_ai_analysis(body)
+            self._json(result)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            log.info("AI 请求的客户端已断开")
+        except (ValueError, UnicodeDecodeError) as exc:
+            self._json({"error": str(exc)}, 400)
+        except OSError as exc:
+            self._json({"error": str(exc)}, 503)
+        except Exception:
+            log.exception("AI接口内部错误")
+            self._json({"error": "AI接口内部错误，请查看服务日志"}, 500)
+        finally:
+            self.connection.settimeout(None)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -832,7 +909,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if path == "/api/health":
                     self._json({"status": "ok", "time": time.strftime("%H:%M:%S"),
-                                "flow_api_version": 5, "flow_sources": ["腾讯", "东方财富"],
+                                "flow_api_version": 6, "flow_sources": ["腾讯", "东方财富"],
+                                "ai_api_version": 2, "premium_api_version": 2,
                                 "breadth_sources": ["新浪", "东方财富"]})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))

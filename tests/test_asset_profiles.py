@@ -73,7 +73,7 @@ class AssetProfileTests(unittest.TestCase):
                 self.assertIsNone(signal["score"])
                 self.assertIsNone(signal["confidence"])
                 self.assertIsNone(signal["canslim"])
-                self.assertEqual(signal["breakouts"], [])
+                self.assertEqual(bool(signal["breakouts"]), code == "511090")
                 self.assertEqual(signal["trade_plan"], {"executable": False})
                 self.assertEqual(signal["input_snapshot"]["status"], "complete")
                 stock_engine.assert_not_called()
@@ -155,7 +155,10 @@ class EtfPremiumTests(unittest.TestCase):
     def test_stale_future_and_missing_iopv_cannot_alert(self):
         result = etf_premium.parse_etf_snapshot(premium_payload(), "513500")
         stamp = datetime.fromisoformat(result["quote_time"])
-        self.assertTrue(etf_premium.snapshot_status(result, stamp + timedelta(seconds=60))["alert_eligible"])
+        self.assertFalse(etf_premium.snapshot_status(result, stamp + timedelta(seconds=60))["alert_eligible"])
+        self.assertEqual(etf_premium.snapshot_status(result, stamp)["status"], "unverified")
+        verified = {**result, "iopv_time": result["quote_time"]}
+        self.assertTrue(etf_premium.snapshot_status(verified, stamp + timedelta(seconds=60))["alert_eligible"])
         for offset in [-1, 121, 86400]:
             self.assertFalse(etf_premium.snapshot_status(result, stamp + timedelta(seconds=offset))["alert_eligible"])
         missing = etf_premium.parse_etf_snapshot(premium_payload(f441="-", f402="-"), "513500")
@@ -190,6 +193,7 @@ class EtfPremiumTests(unittest.TestCase):
         nav = {"history": [{"date": "2026-01-02", "nav": 1}], "source": "fixture",
                "source_url": "https://example.test/nav", "fetched_at": "2026-01-05T02:00:00Z"}
         with patch.object(app, "fetch_etf_premium", side_effect=OSError("IOPV缺失")), \
+                patch.object(app, "fetch_quote", return_value=None), \
                 patch.object(app, "fetch_fund_nav", return_value=nav):
             result = app.handle_etf_premium({"symbol": ["513500"]})
         self.assertIsNone(result["iopv"])

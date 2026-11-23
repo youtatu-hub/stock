@@ -55,12 +55,16 @@ test('费用来源失败明确显示，外部文本转义，不把未知限额�
 test('IOPV提醒会随时间过期，已披露净值偏离不触发提醒', () => {
   const now = Date.parse('2026-01-05T02:00:30Z');
   const data = {iopv: {price: 1.1, iopv: 1, premium_pct: 10, snapshot_fresh: true, alert_eligible: true,
+    iopv_fresh: true, iopv_time: '2026-01-05T02:00:00Z',
     quote_time: '2026-01-05T02:00:00Z', fresh_until: '2026-01-05T02:02:00Z', source: '测试', note: 'IOPV无独立时间'},
     disclosed_nav: {value: 0.8, date: '2026-01-02', premium_pct: 37.5, source: '测试', source_url: 'https://example.test', basis: '非盘中估值'}};
   assert.match(premiumHtml(data, 3, esc, now), /参考溢价幅度达到/);
   assert.doesNotMatch(premiumHtml(data, 20, esc, now), /参考溢价幅度达到/);
   assert.doesNotMatch(premiumHtml(data, 3, esc, now + 200000), /参考溢价幅度达到/);
   assert.doesNotMatch(premiumHtml({...data, iopv: null}, 3, esc, now), /参考溢价幅度达到/);
+  const unknownTime = premiumHtml({...data, iopv: {...data.iopv, iopv_time: null, iopv_fresh: false}}, 3, esc, now);
+  assert.doesNotMatch(unknownTime, /参考溢价幅度达到/);
+  assert.match(unknownTime, /IOPV独立更新时间<\/dt><dd>来源未提供/);
 });
 
 test('小白模式显示后端CAN加权总分，不另算七项平均', () => {

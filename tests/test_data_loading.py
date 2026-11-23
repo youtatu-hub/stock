@@ -257,6 +257,10 @@ class BreadthTests(unittest.TestCase):
 
 
 class QuoteFallbackTests(unittest.TestCase):
+    def setUp(self):
+        # 固定历史报价用于传输/缓存测试；行情滞后在独立用例中注入北京时间检查。
+        self.enterContext(patch.object(fetcher, "quote_delay_reason", return_value=""))
+
     def quote(self):
         return fetcher.Quote("999996", "测试ETF", 10.08, 0.8, 0.08, 10.1, 9.9,
                              10, 10, 400, 403200, 1.23,

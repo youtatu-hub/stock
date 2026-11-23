@@ -8,6 +8,7 @@
 <script src="/request-loader.js"></script>
 <script src="/fund-view.js"></script>
 <script src="/asset-view.js"></script>
+<script src="/ai-view.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -714,6 +715,51 @@ body {
 .fund-share-btn.active { border-color: #ff9800; color: #ffb74d; }
 .fund-terms-share summary { color: #b8c9dc; font-size: 12px; cursor: pointer; }
 .fee-lines { font-size: 11px; line-height: 1.8; color: #ccc; }
+#ai-card { background: linear-gradient(145deg, #182335 0%, #111822 68%); border: 1px solid #30445f; border-radius: 14px; box-shadow: 0 8px 24px #0003; overflow: hidden; }
+.ai-head { display: flex; align-items: center; gap: 10px; padding: 16px 16px 12px; }
+.ai-mark { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #638fe04d; border-radius: 11px; background: #6d9fff14; color: #a8cbff; flex-shrink: 0; }
+.ai-eyebrow { display: block; margin-bottom: 3px; color: #859dbd; font-size: 9px; font-weight: 700; letter-spacing: 2px; }
+.ai-title { color: #e6efff; font-size: 14px; font-weight: 600; }
+.ai-auto { margin-left: auto; display: flex; align-items: center; gap: 5px; color: #9aaec9; font-size: 10px; white-space: nowrap; }
+.ai-auto::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: #8195b2; }
+.ai-body { padding: 0 16px 14px; font-size: 12px; }
+.ai-controls { display: flex; align-items: end; gap: 8px; }
+.ai-model-label { display: block; min-width: 0; flex: 1; color: #8fa2bd; font-size: 10px; }
+.ai-controls select { width: 100%; min-width: 0; height: 35px; margin-top: 6px; padding: 0 26px 0 10px; color: #d9e6fa; background: #0d1522; border: 1px solid #30445f; border-radius: 7px; text-overflow: ellipsis; }
+.ai-controls button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 35px; padding: 0 10px; background: #243750; color: #b8d5ff; border: 1px solid #3b5578; border-radius: 7px; cursor: pointer; font-size: 11px; white-space: nowrap; transition: background .15s, border-color .15s; }
+.ai-controls button:hover { background: #2c4464; border-color: #6694cf; }
+.ai-controls select:focus-visible, .ai-controls button:focus-visible { outline: 2px solid #86b7ff; outline-offset: 2px; }
+.ai-controls :disabled { opacity: .5; cursor: wait; }
+.ai-status { display: flex; align-items: center; gap: 7px; min-height: 32px; color: #91a6c1; font-size: 11px; line-height: 1.6; }
+.ai-progress { display: none; width: 11px; height: 11px; flex-shrink: 0; border: 1.5px solid #385572; border-top-color: #a2c7ff; border-radius: 50%; animation: ai-spin 1s linear infinite; }
+.ai-result { padding-top: 4px; }
+.ai-output { color: #bdcbdd; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; text-align: left; }
+.ai-insight + .ai-insight { margin-top: 16px; }
+.ai-section-title { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; color: #9db3ce; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
+.ai-section-title::before { content: ''; width: 4px; height: 4px; flex-shrink: 0; background: #7799c7; border-radius: 50%; }
+.ai-section-content p + p { margin-top: 8px; }
+.ai-section-content strong { color: #edf4ff; font-weight: 600; }
+.ai-section-content h4 { margin: 10px 0 6px; color: #d5e3f5; font-size: 12px; font-weight: 600; }
+.ai-section-content ul, .ai-section-content ol { margin: 6px 0; padding-left: 18px; }
+.ai-section-content li + li { margin-top: 7px; }
+.ai-section-content li::marker { color: #7892b3; }
+.ai-section-content code { padding: 1px 4px; border-radius: 4px; background: #7594bd16; color: #d4e6ff; font-family: inherit; font-size: .95em; }
+.ai-insight-conclusion { padding: 12px 13px; border: 1px solid #4f9e8b38; border-radius: 9px; background: linear-gradient(135deg, #62b99d12, #62b99d04); }
+.ai-insight-conclusion .ai-section-title { color: #8bcab8; }
+.ai-insight-conclusion .ai-section-title::before { background: #8bcab8; }
+.ai-insight-conclusion .ai-section-content > p:first-child { color: #e2f1ed; font-size: 14px; font-weight: 500; line-height: 1.75; }
+.ai-insight-risk .ai-section-title { color: #d3b28b; }
+.ai-insight-risk .ai-section-title::before { background: #d3b28b; }
+.ai-insight-conditions { padding-top: 12px; border-top: 1px solid #9ab4d215; }
+.ai-output:empty::before { content: '解读将在这里自动呈现'; display: block; padding: 20px 0; color: #657c9a; text-align: center; }
+.ai-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 16px; padding-top: 10px; border-top: 1px solid #9ab4d215; color: #7085a1; font-size: 10px; line-height: 1.5; }
+.ai-footer time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+#ai-card[data-state="loading"] .ai-progress, #ai-card[data-state="analyzing"] .ai-progress { display: inline-block; }
+#ai-card[data-state="ready"] .ai-auto::before { background: #72cdb2; box-shadow: 0 0 8px #72cdb233; }
+#ai-card[data-state="error"] .ai-status { color: #e9b58c; }
+#ai-card[data-state="error"] .ai-auto::before { background: #e9b58c; }
+@keyframes ai-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ai-progress { animation: none; } }
 </style>
 </head>
 <body>
@@ -797,7 +843,7 @@ body {
       <div id="minute-vol"></div>
       <div class="flow-section" id="flow-section">
         <div class="fs-title">
-          <span class="flow-heading">资金流向</span>
+          <span class="flow-heading" id="flow-heading">资金流向 · 今日实时</span>
           <div id="flow-summary"></div>
           <span class="flow-toggle">
             <button class="ft-btn ft-active" id="ft-rt" onclick="switchFlowMode('realtime')">今日实时</button>
@@ -823,6 +869,22 @@ body {
 
   <!-- ===== 右侧：信号 ===== -->
   <div class="right-panel">
+    <div class="signal-card" id="ai-card" data-state="loading" aria-label="CPA智能解读" aria-busy="true">
+      <div class="ai-head">
+        <span class="ai-mark" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span>
+        <div><span class="ai-eyebrow">CPA</span><h2 class="ai-title">AI 智能解读</h2></div>
+        <span class="ai-auto">自动解读</span>
+      </div>
+      <div class="ai-body">
+        <div class="ai-controls">
+          <label class="ai-model-label">分析模型<select name="model" disabled><option value="">正在加载模型…</option></select></label>
+          <button type="button" data-ai-refresh title="刷新模型列表并更新解读"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7v5h-5M4 17v-5h5M6.1 6.1A8 8 0 0 1 19.7 11M4.3 13A8 8 0 0 0 17.9 17.9"/></svg>刷新模型</button>
+        </div>
+        <div class="ai-status" role="status"><span class="ai-progress" aria-hidden="true"></span><span data-ai-status>正在加载可用模型…</span></div>
+        <div class="ai-result"><div class="ai-output" data-ai-output aria-live="polite"></div></div>
+        <div class="ai-footer"><span data-ai-context>切换品种或模型后自动更新</span><time data-ai-time aria-label="北京时间生成时间"></time></div>
+      </div>
+    </div>
     <div class="signal-card" id="premium-card" hidden>
       <div class="sc-header">ETF 折溢价参考</div>
       <div class="premium-settings"><label>偏离提醒阈值 <input id="premium-threshold" type="number" min="0.1" max="100" step="0.1" value="3" required> %</label></div>
@@ -830,7 +892,7 @@ body {
     </div>
     <!-- 一句话总结（小白第一眼看的） -->
     <div class="summary-card" id="summary-card">
-      <div class="sc-header">AI 分析结论</div>
+      <div class="sc-header">规则分析结论</div>
       <div class="sum-body" id="sum-body">
         <div class="sum-action-row">
           <span class="sum-badge sum-badge-watch">等待分析</span>
@@ -953,6 +1015,8 @@ body {
 
 <script>
 const API = '';
+const aiPanel = new AIAnalysisPanel(document.getElementById('ai-card'), API);
+aiPanel.initialize();
 let currentSymbol = '';
 let currentView = 'dayk';
 let _mode = 'pro';  // 'pro' or 'simple'
@@ -1953,7 +2017,7 @@ function _renderDailyFlow(flows, status = {}) {
   const lagCount = status.lag_trading_days ?? (currentView === 'dayk' ? _klineData.filter(k => k.date > lastDate).length : null);
   document.getElementById('flow-meta').textContent = `日级数据截至 ${lastDate}；成功获取 ${formatDataTime(status.fetched_at)} · ${status.source || '东方财富'}${lagging ? `；落后于K线截至 ${reference}${lagCount != null ? '，缺少最近' + lagCount + '个交易日' : ''}` : ''}${status.message ? '；' + status.message : ''}`;
   const dates = flows.map(f => f.date);
-  const mainNet = flows.map(f => +(f.main_net / 1e8).toFixed(4));
+  const mainNet = flows.map(f => Number.isFinite(f.main_net) ? +(f.main_net / 1e8).toFixed(4) : null);
   const superLarge = flows.map(f => +(f.super_large_net / 1e8).toFixed(4));
   flowChart.setOption({
     backgroundColor: C.bg, animation: false,
@@ -1979,6 +2043,7 @@ function stopFlowRequests() {
 function switchFlowMode(mode) {
   stopFlowRequests();
   _flowMode = mode;
+  document.getElementById('flow-heading').textContent = mode === 'realtime' ? '资金流向 · 今日实时' : '资金流向 · 近30日';
   document.getElementById('ft-rt').classList.toggle('ft-active', mode === 'realtime');
   document.getElementById('ft-daily').classList.toggle('ft-active', mode === 'daily');
   flowChart.clear();
@@ -2071,15 +2136,15 @@ function renderRealtimeFlow(data) {
     return;
   }
   const summary = data.summary || {};
-  fs.innerHTML = `<div class="flow-period">${escHtml(data.data_date || '数据日期未提供')}<span>${data.is_today ? '今日单日累计' : '该交易日累计'}</span>${data.stale ? '<span class="flow-stale">刷新失败，显示旧数据</span>' : ''}</div>`
+  fs.innerHTML = `<div class="flow-period">${escHtml(data.data_date || '数据日期未提供')}<span>${data.is_today ? '今日实时 · 当日累计' : '最近交易日 · 当日累计'}</span>${data.stale ? '<span class="flow-stale">刷新失败，显示旧数据</span>' : ''}</div>`
     + FLOW_COLUMNS.map(([key, label]) => flowMetricHtml(label, summary[key])).join('');
   renderFlowDetails(data.flows, true);
   const referenceDate = _klineData.at(-1)?.date;
   const behind = data.data_date && referenceDate && data.data_date < referenceDate;
   const metaText = `${data.session_note ? data.session_note + '；' : ''}数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '来源未提供'}${data.source_note ? '；' + data.source_note : ''}；${data.accounting_note || '主力净额 = 超大单净额 + 大单净额'}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}`;
-  document.getElementById('flow-meta').innerHTML = `${escHtml(metaText)}；<span class="flow-refresh">下次自动刷新 ${escHtml(nextTime)}</span>`;
+  document.getElementById('flow-meta').innerHTML = `${escHtml(metaText)}${data.quality_note ? '；' + escHtml(data.quality_note) : ''}；<span class="flow-refresh">下次自动刷新 ${escHtml(nextTime)}</span>`;
   const flows = data.flows;
-  const mainNet = flows.map(f => +(f.main_net / 1e8).toFixed(4));
+  const mainNet = flows.map(f => Number.isFinite(f.main_net) ? +(f.main_net / 1e8).toFixed(4) : null);
   flowChart.setOption({
     backgroundColor: C.bg, animation: false,
     legend: {data: FLOW_COLUMNS.map(([, label]) => label + '净流入(累计)'), textStyle: {color: C.textDim, fontSize: 10}, top: 2, itemWidth: 12, itemHeight: 8},
@@ -2092,7 +2157,7 @@ function renderRealtimeFlow(data) {
         data: flows.map(f => Number.isFinite(f[key]) ? +(f[key] / 1e8).toFixed(4) : null), symbol: 'none',
         lineStyle: {color: [C.ma20, '#a78bfa', '#38bdf8', '#eab308'][i], width: 1}})),
     ],
-    tooltip: {trigger: 'axis', formatter: items => items.length ? `${escHtml(data.data_date || '')} ${escHtml(items[0].axisValue)}<br>` + items.map(item => `${item.seriesName}: ${item.value >= 0 ? '+' : ''}${item.value.toFixed(4)}亿`).join('<br>') : ''},
+    tooltip: {trigger: 'axis', formatter: items => items.length ? `${escHtml(data.data_date || '')} ${escHtml(items[0].axisValue)}<br>` + items.map(item => `${item.seriesName}: ${Number.isFinite(item.value) ? (item.value >= 0 ? '+' : '') + item.value.toFixed(4) + '亿' : '源数据缺失'}`).join('<br>') : ''},
   }, true);
 }
 
@@ -2302,10 +2367,10 @@ function renderSignal(signal) {
     const coreTag = isCore ? '<span class="sig-core-tag">核心</span>' : '';
     if (s.type === 'buy') return `<div class="sig-item sig-buy">▲ ${s.text}${coreTag}</div>`;
     else return `<div class="sig-item sig-sell">▼ ${s.text}${coreTag}</div>`;
-  }).join('') || `<div style="color:#999;font-size:12px;padding:8px">${signal.model === 'technical' ? '以下为突破模型参考，不代表实际持仓或交易指令。' : '暂无信号'}</div>`;
+  }).join('') || `<div style="color:#999;font-size:12px;padding:8px">${signal.model && signal.model !== 'stock' ? '以下为突破模型参考，不代表实际持仓或交易指令。' : '暂无信号'}</div>`;
   for (const breakout of signal.breakouts || []) {
     if (!breakout.entry_price || breakout.direction === 'none') {
-      if (signal.model === 'technical') sl.innerHTML += `<div class="asset-note">${escHtml(breakout.system)}：${escHtml(breakout.signal)}</div>`;
+      if (signal.model && signal.model !== 'stock') sl.innerHTML += `<div class="asset-note">${escHtml(breakout.system)}：${escHtml(breakout.signal)}</div>`;
       continue;
     }
     const side = breakout.direction === 'short' ? '做空' : '做多';
@@ -2653,18 +2718,19 @@ function currentInstrument() {
 
 function applyAssetVisibility(instrument) {
   const stock = instrument.model === 'stock';
-  for (const name of ['module', 'canslim', 'levels', 'accuracy']) {
+  for (const name of ['module', 'levels', 'accuracy']) {
     document.querySelector(`[data-card="${name}"]`).hidden = !stock;
   }
+  document.querySelector('[data-card="canslim"]').hidden = !instrument.canslim;
   const signalsCard = document.querySelector('[data-card="signals"]');
-  signalsCard.hidden = !stock && instrument.model !== 'technical';
+  signalsCard.hidden = !instrument.price_models;
   signalsCard.querySelector('.sc-header').innerHTML = `<span class="sc-arrow">▼</span>${stock ? '买卖信号' : '突破模型参考'}`;
   for (const id of ['plan-card', 'market-card']) document.getElementById(id).hidden = !stock;
   for (const id of ['chanlun-card', 'chanlun-daily-card']) document.getElementById(id).hidden = !instrument.chanlun;
-  document.getElementById('flow-section').hidden = !stock && instrument.model !== 'technical';
+  document.getElementById('flow-section').hidden = !instrument.fund_flow;
   document.getElementById('premium-card').hidden = instrument.asset_type !== 'overseas_etf';
   document.getElementById('premium-body').textContent = '';
-  document.getElementById('summary-card').querySelector('.sc-header').textContent = stock ? '分析结论' : '资产观察';
+  document.getElementById('summary-card').querySelector('.sc-header').textContent = stock ? '规则分析结论' : instrument.price_models ? '趋势参考' : '资产观察';
 }
 
 function refreshPremiumPanel(session) {
@@ -2730,6 +2796,7 @@ async function analyze(symbol) {
   _lastSignalData = null;
   _currentStockName = '';
   const isFund = isFundSymbol(symbol);
+  aiPanel.setTarget(currentInstrument(), currentView === 'week' ? 'week' : 'day');
   document.getElementById('stock-view').hidden = isFund;
   document.getElementById('load-status').hidden = isFund;
   document.getElementById('fund-view').hidden = !isFund;
@@ -2809,8 +2876,8 @@ async function analyze(symbol) {
       chartReady = true;
       if (_dailyChanlun) applyChanlunDailyOverlay(_dailyChanlun);
       updateKlineStatus(data.kline_status);
-      if (instrument.model === 'stock') renderFlow(data.flows, data.flow_status);
-      else if (instrument.model === 'technical' && _flowMode === 'daily') loadHistoricalFlow(symbol);
+      if (instrument.model === 'stock' || instrument.canslim) renderFlow(data.flows, data.flow_status);
+      else if (instrument.fund_flow && _flowMode === 'daily') loadHistoricalFlow(symbol);
       renderSignal(data.signal);
       renderCanslim(data.signal.canslim);
       renderKeyLevels(data.signal.key_levels);

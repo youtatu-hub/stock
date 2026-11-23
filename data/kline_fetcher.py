@@ -38,6 +38,7 @@ from data.request_runtime import (
     HTTP_ATTEMPT_SECONDS, collect_stages, data_stage, deadline_scope, remaining_seconds, request_id,
 )
 from data.market_time import flow_session_status
+from data.instruments import get_instrument
 
 log = logging.getLogger("trend_data")
 
@@ -104,9 +105,10 @@ TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 TENCENT_QUOTE = "https://qt.gtimg.cn/"
 TENCENT_FLOW = "https://proxy.finance.qq.com/cgi/cgi-bin/fundflow/hsfundtab"
 FLOW_PRIMARY_BUDGET_SECONDS = 3.0
-QUOTE_SOURCE_BUDGET_SECONDS = 1.2
+QUOTE_SOURCE_BUDGET_SECONDS = 3.0
 QUOTE_STALE_TTL_SECONDS = 15 * 60
 QUOTE_RETRY_SECONDS = 10
+QUOTE_MAX_LAG_SECONDS = 120
 
 UA_POOL = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -662,6 +664,17 @@ def _validate_quote(quote: Quote) -> None:
             raise ValueError("报价成交量与成交额不一致，成交均价超出当日高低价")
 
 
+def quote_delay_reason(quote: Quote, now=None) -> str:
+    if not quote.timestamp:
+        return ""
+    now = now or datetime.now(timezone(timedelta(hours=8)))
+    clock = now.strftime("%H:%M")
+    if now.weekday() >= 5 or not ("09:32" <= clock <= "11:30" or "13:02" <= clock <= "15:00"):
+        return ""
+    age = (now - datetime.fromisoformat(quote.timestamp)).total_seconds()
+    return f"来源行情时间落后{int(age)}秒" if age > QUOTE_MAX_LAG_SECONDS else ""
+
+
 @data_stage
 def fetch_quote(symbol: str) -> Optional[Quote]:
     """独立报价源依次限时尝试；失败不会删除或刷新成功快照的时间。"""
@@ -680,6 +693,15 @@ def fetch_quote(symbol: str) -> Optional[Quote]:
                     quote = fetcher(symbol)
                 if quote and math.isfinite(quote.price) and quote.price > 0:
                     _validate_quote(quote)
+                    delay = quote_delay_reason(quote)
+                    if previous and quote.timestamp and previous.timestamp and quote.timestamp < previous.timestamp:
+                        failures.append(f"{source}返回的行情时间倒退")
+                        continue
+                    if delay:
+                        failures.append(f"{source}{delay}")
+                        if previous is None or quote.timestamp > previous.timestamp:
+                            previous = quote
+                        continue
                     if (not quote.name or quote.name == symbol) and previous:
                         quote = replace(quote, name=previous.name)
                     _cache_set(cache_key, quote)
@@ -840,6 +862,8 @@ class MinuteFlow:
     date: str = ""
     fetched_at: str = ""
     source: str = "东方财富"
+    quality_note: str = ""
+    available: bool = True
 
 
 @data_stage
@@ -915,12 +939,19 @@ def _fetch_realtime_flow_tencent(symbol: str) -> List[MinuteFlow]:
         amounts = {name: _to_float(row.get(field)) for name, field in fields.items()}
         if any(value is None or not math.isfinite(value) for value in amounts.values()):
             raise ValueError("分时资金流金额缺失或无效")
-        if not math.isclose(amounts["main_net"], amounts["super_large_net"] + amounts["large_net"],
-                            rel_tol=1e-5, abs_tol=1):
-            raise ValueError("分时主力净额与超大单、大单之和不一致")
+        component_net = amounts["super_large_net"] + amounts["large_net"]
+        quality_note = ""
+        if not math.isclose(amounts["main_net"], component_net, rel_tol=1e-5, abs_tol=1):
+            inflow, outflow = (_to_float(row.get(key)) for key in ("MainInflow", "MainOutflow"))
+            if (amounts["main_net"] != 0 or inflow is None or outflow is None
+                    or not all(math.isfinite(value) and value >= 0 for value in (inflow, outflow))
+                    or not math.isclose(inflow - outflow, component_net, rel_tol=1e-5, abs_tol=1)):
+                raise ValueError("分时主力净额与超大单、大单之和不一致")
+            amounts["main_net"] = component_net
+            quality_note = "来源主力字段为零占位，按同源超大单与大单净额相加，并与主力流入减流出核对"
         # 上游字段已是累计净额，单位为元；不再次累加，也不混入东财分项。
         flows.append(MinuteFlow(time=moment.strftime("%H:%M"), date=moment.date().isoformat(),
-                                fetched_at=fetched_at, source="腾讯", **amounts))
+                                fetched_at=fetched_at, source="腾讯", quality_note=quality_note, **amounts))
     return flows
 
 
@@ -944,18 +975,26 @@ def _fetch_realtime_flow_eastmoney(symbol: str) -> List[MinuteFlow]:
     flows: List[MinuteFlow] = []
     for line in data["data"]["klines"]:
         parts = line.split(",")
-        if len(parts) >= 6:
-            t = parts[0].split(" ")[-1] if " " in parts[0] else parts[0]
-            flows.append(MinuteFlow(
-                time=t,
-                main_net=_to_float(parts[1]) or 0.0,
-                small_net=_to_float(parts[2]) or 0.0,
-                medium_net=_to_float(parts[3]) or 0.0,
-                large_net=_to_float(parts[4]) or 0.0,
-                super_large_net=_to_float(parts[5]) or 0.0,
-                date=parts[0].split(" ", 1)[0] if " " in parts[0] else "",
-                fetched_at=data.get("fetched_at", ""),
-            ))
+        if len(parts) < 6:
+            raise ValueError("东方财富分时资金流字段不足")
+        moment = datetime.strptime(parts[0], "%Y-%m-%d %H:%M")
+        amounts = [_to_float(value) for value in parts[1:6]]
+        if any(value is None or not math.isfinite(value) for value in amounts):
+            raise ValueError("东方财富分时资金流金额缺失或无效")
+        flows.append(MinuteFlow(
+            time=moment.strftime("%H:%M"), date=moment.date().isoformat(),
+            main_net=amounts[0], small_net=amounts[1], medium_net=amounts[2],
+            large_net=amounts[3], super_large_net=amounts[4],
+            fetched_at=data.get("fetched_at", ""),
+        ))
+    if flows and get_instrument(symbol).get("benchmark") == "纳斯达克100":
+        latest = max(row.date for row in flows)
+        opening = [row for row in flows if row.date == latest and "09:31" <= row.time <= "10:30"]
+        if len(opening) == 60 and all(not any((r.main_net, r.small_net, r.medium_net, r.large_net, r.super_large_net)) for r in opening):
+            # 已核验的东财首小时零占位；不能把它画成真实的零流入。
+            for row in opening:
+                row.available = False
+                row.quality_note = "东方财富09:31–10:30返回全零占位，首小时数据未核验，按缺失展示；未与其他来源拼接"
     return flows
 
 
