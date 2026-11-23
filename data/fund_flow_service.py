@@ -69,7 +69,7 @@ class RealtimeFlowService:
                 "symbol": symbol, "status": "ok", "stale": False,
                 "source": last.source, "checked_at": checked_at,
                 "source_note": f"按{last.source}口径统计，不同来源的资金流金额可能有差异",
-                "accounting_note": "主力净额 = 超大单净额 + 大单净额；各分项可一进一出，不能只比较主力与超大单",
+                "accounting_note": "主力净额 = 超大单净额 + 大单净额",
                 "fetched_at": last.fetched_at or checked_at,
                 "data_date": last.date or None,
                 "as_of": f"{last.date} {last.time}".strip(),

@@ -21,17 +21,29 @@ body {
 
 /* ===== 顶部栏 ===== */
 .topbar {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  display: grid; grid-template-columns: minmax(0, 1fr) clamp(360px, 30vw, 560px);
+  align-items: start; gap: 12px;
   padding: 6px 16px;
   background: linear-gradient(180deg, #161616, #0d0d0d);
   border-bottom: 1px solid #2a2a2a;
   min-height: 48px; flex-shrink: 0;
   box-shadow: 0 1px 4px rgba(0,0,0,0.5);
 }
+.topbar-controls {
+  display: grid; grid-template-columns: auto 180px minmax(0, 1fr) auto auto auto;
+  grid-template-areas: 'logo search groups scan mode watch';
+  align-items: center; gap: 8px; min-width: 0;
+}
+.topbar-controls > .logo { grid-area: logo; }
+.topbar-controls > .search-wrap { grid-area: search; }
+.topbar-controls > .focus-groups { grid-area: groups; }
+.topbar-controls > .scan-btn { grid-area: scan; }
+.topbar-controls > .mode-toggle { grid-area: mode; }
+.topbar-controls > .watch-wrap { grid-area: watch; }
 .logo { font-size: 15px; font-weight: bold; color: #ff9800; white-space: nowrap; letter-spacing: 1px; }
-.search-wrap { position: relative; }
+.search-wrap { position: relative; min-width: 0; }
 .search-wrap input {
-  width: 200px; padding: 6px 10px;
+  width: 100%; padding: 6px 10px;
   background: #1a1a1a; border: 1px solid #333;
   color: #fff; border-radius: 4px; font-size: 13px;
 }
@@ -53,14 +65,26 @@ body {
 
 /* 行情显示 */
 .quote-bar {
-  display: flex; align-items: center; gap: 16px; margin-left: auto;
-  white-space: nowrap; flex-wrap: wrap; row-gap: 2px;
+  display: flex; align-items: center; gap: 2px 12px; min-width: 0;
+  padding-left: 16px; border-left: 1px solid #2a2a2a;
+  white-space: nowrap; flex-wrap: wrap;
 }
-.qb-name { font-size: 15px; font-weight: bold; color: #fff; }
+.qb-name { font-size: 15px; font-weight: bold; color: #fff; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .qb-price { font-size: 24px; font-weight: bold; }
 .qb-pct { font-size: 16px; font-weight: bold; }
-.qb-meta { font-size: 12px; color: #888; }
-.qb-timing { flex-basis: 100%; font-size: 11px; color: #888; white-space: normal; }
+.qb-meta { font-size: 12px; color: #888; white-space: normal; }
+.qb-timing { flex-basis: 100%; font-size: 11px; color: #888; white-space: normal; line-height: 1.5; overflow-wrap: anywhere; }
+@media (max-width: 1200px) {
+  .topbar { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .quote-bar { border-left: 0; border-top: 1px solid #2a2a2a; padding: 6px 0 0; }
+}
+@media (max-width: 800px) {
+  .topbar-controls {
+    grid-template-columns: auto minmax(100px, 1fr) auto auto;
+    grid-template-areas: 'logo search scan mode' 'groups groups watch watch';
+  }
+  .topbar-controls > .watch-wrap { justify-self: end; }
+}
 
 /* 涨跌色 */
 .up { color: #ff2d2d; }
@@ -131,7 +155,7 @@ body {
   display: grid; grid-template-columns: 1fr 340px;
   gap: 1px; background: #1a1a1a; flex: 1; min-height: 0;
 }
-.left-panel { background: #000; display: flex; flex-direction: column; overflow: hidden; }
+.left-panel { background: #000; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .right-panel { background: #0a0a0a; overflow-y: auto; padding: 10px; }
 
 /* ===== 图表工具栏 ===== */
@@ -152,32 +176,52 @@ body {
 .tb-label { font-size: 11px; color: #555; }
 
 /* ===== 图表容器 ===== */
-.chart-container { flex: 1; display: flex; flex-direction: column; position: relative; }
-#kline-chart { width: 100%; flex: 1; min-height: 200px; }
+.chart-container { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; overflow-y: auto; overflow-x: hidden; }
+#kline-chart { width: 100%; flex: 1 0 200px; min-height: 200px; }
 #volume-chart { width: 100%; height: 90px; flex-shrink: 0; }
-#minute-chart { width: 100%; flex: 1; min-height: 200px; display: none; }
+#minute-chart { width: 100%; flex: 1 0 200px; min-height: 200px; display: none; }
 #minute-vol { width: 100%; height: 90px; flex-shrink: 0; display: none; }
 
 /* 资金流 */
-.flow-section { max-height: 320px; overflow-y: auto; flex-shrink: 0; border-top: 1px solid #1a1a1a; }
+.flow-section { flex-shrink: 0; border-top: 1px solid #2a2a2a; }
 .flow-section .fs-title {
-  font-size: 11px; color: #666; padding: 4px 12px;
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12px; color: #aaa; padding: 10px 12px 6px;
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 16px;
 }
-#flow-chart { width: 100%; height: 100px; }
-#flow-meta { padding: 0 12px 4px; color: #999; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-#flow-details { padding: 0 12px 6px; font-size: 11px; color: #aaa; }
-#flow-details table { width: 100%; text-align: right; border-collapse: collapse; }
-#flow-details th, #flow-details td { padding: 3px 8px; border-bottom: 1px solid #222; }
-#flow-details summary { cursor: pointer; }
+.flow-heading { color: #ff9800; font-weight: 600; white-space: nowrap; }
+#flow-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; min-width: 0; }
+.flow-metric, .flow-period { border-left: 1px solid #333; padding-left: 12px; min-width: 0; }
+.flow-metric-main { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.flow-metric-main b { font-size: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.flow-metric-detail, .flow-period span { display: block; margin-top: 3px; color: #888; font-size: 11px; line-height: 1.5; }
+.flow-period .flow-stale { color: #ff9800; }
+#flow-chart { width: 100%; height: 120px; }
+#flow-meta { padding: 0 12px 6px; color: #999; font-size: 11px; line-height: 1.5; text-align: right; overflow-wrap: anywhere; }
+.flow-refresh { display: inline-block; white-space: nowrap; }
+#flow-details { padding: 4px 12px 10px; font-size: 12px; color: #bbb; }
+#flow-details-toggle { border: 1px solid #2a2a2a; border-radius: 4px; overflow: hidden; }
+#flow-details summary { padding: 7px 10px; background: #111; cursor: pointer; }
+#flow-details summary:hover { color: #fff; background: #1a1a1a; }
+#flow-details-scroll { max-height: 200px; overflow: auto; }
+#flow-details table { width: 100%; min-width: 600px; text-align: right; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; }
+#flow-details th, #flow-details td { padding: 7px 12px; border-bottom: 1px solid #222; white-space: nowrap; }
+#flow-details th { position: sticky; top: 0; z-index: 1; background: #1a1a1a; color: #ddd; font-weight: 500; }
+#flow-details th:first-child, #flow-details td:first-child { text-align: left; }
+#flow-details tbody tr:nth-child(even) { background: #0c0c0c; }
+#flow-details tbody tr:hover { background: #1a1a1a; }
 .ft-btn:disabled { opacity: 0.5; cursor: wait; }
-.flow-toggle { margin-left: auto; display: flex; gap: 2px; }
+.flow-toggle { display: flex; gap: 4px; white-space: nowrap; }
 .ft-btn {
-  font-size: 10px; padding: 1px 6px; border: 1px solid #333; border-radius: 3px;
-  background: #1a1a1a; color: #666; cursor: pointer; transition: all 0.15s;
+  font-size: 11px; padding: 4px 8px; border: 1px solid #333; border-radius: 3px;
+  background: #1a1a1a; color: #999; cursor: pointer; transition: all 0.15s;
 }
 .ft-btn:hover { color: #aaa; border-color: #555; }
 .ft-btn.ft-active { background: #ff9800; color: #fff; border-color: #ff9800; }
+@media (max-width: 720px) {
+  .flow-section .fs-title { grid-template-columns: 1fr auto; gap: 10px; }
+  #flow-summary { grid-column: 1 / -1; grid-row: 2; }
+  #flow-meta { text-align: left; }
+}
 
 /* ===== 右侧信号面板 ===== */
 .signal-card {
@@ -325,6 +369,7 @@ body {
 .focus-groups {
   display: flex; gap: 4px; min-width: 0; overflow-x: auto;
 }
+.focus-groups::-webkit-scrollbar { height: 4px; }
 .focus-group-btn, .focus-stock-btn {
   padding: 5px 9px; font-size: 12px;
   background: #1a1a1a; border: 1px solid #2a2a2a;
@@ -674,33 +719,35 @@ body {
 <body>
 
 <div class="topbar">
-  <div class="logo">趋势分析</div>
-  <div class="search-wrap">
-    <input type="text" id="search-input" placeholder="代码/名称 如 511360" autocomplete="off">
-    <div class="search-results" id="search-results"></div>
-  </div>
-  <nav class="focus-groups" id="focus-groups" aria-label="关注目录"></nav>
-  <button class="scan-btn" id="scan-btn" onclick="openScan()">扫描买入</button>
-  <div class="mode-toggle">
-    <button class="mt-btn active" id="mt-pro" onclick="setMode('pro')">专业</button>
-    <button class="mt-btn" id="mt-simple" onclick="setMode('simple')">小白</button>
-  </div>
-  <div class="watch-wrap">
-    <button class="wc-btn wc-star" id="star-btn" title="加入/移除自选" onclick="toggleStar()">☆</button>
-    <button class="wc-btn" id="watch-btn" style="position:relative" onclick="togglePanel('watch')">自选<span class="wc-badge" id="watch-count" style="display:none">0</span><span class="wc-change-badge" id="watch-change" style="display:none">0</span></button>
-    <button class="wc-btn" id="history-btn" onclick="togglePanel('history')">历史<span class="wc-badge" id="history-count" style="display:none">0</span></button>
-    <div class="wp-panel" id="wp-panel">
-      <div class="wp-tabs">
-        <button class="wp-tab active" data-tab="watch" onclick="switchTab('watch')">自选股<span class="wp-tab-count" id="wt-count"></span></button>
-        <button class="wp-tab" data-tab="history" onclick="switchTab('history')">历史记录<span class="wp-tab-count" id="ht-count"></span></button>
-        <button class="wp-tab" data-tab="overview" onclick="switchTab('overview')">多股一览<span class="wp-tab-count" id="ov-count"></span></button>
-      </div>
-      <div class="wp-list" id="wp-content-watch"></div>
-      <div class="wp-list" id="wp-content-history" style="display:none"></div>
-      <div class="wp-list" id="wp-content-overview" style="display:none"></div>
-      <div class="wp-footer" id="wp-footer" style="display:none">
-        <span class="wp-footer-info" id="wp-footer-info"></span>
-        <button class="wp-clear" id="wp-clear-btn" onclick="clearCurrentTab()">清空</button>
+  <div class="topbar-controls">
+    <div class="logo">趋势分析</div>
+    <div class="search-wrap">
+      <input type="text" id="search-input" placeholder="代码/名称 如 511360" autocomplete="off">
+      <div class="search-results" id="search-results"></div>
+    </div>
+    <nav class="focus-groups" id="focus-groups" aria-label="关注目录"></nav>
+    <button class="scan-btn" id="scan-btn" onclick="openScan()">扫描买入</button>
+    <div class="mode-toggle">
+      <button class="mt-btn active" id="mt-pro" onclick="setMode('pro')">专业</button>
+      <button class="mt-btn" id="mt-simple" onclick="setMode('simple')">小白</button>
+    </div>
+    <div class="watch-wrap">
+      <button class="wc-btn wc-star" id="star-btn" title="加入/移除自选" onclick="toggleStar()">☆</button>
+      <button class="wc-btn" id="watch-btn" style="position:relative" onclick="togglePanel('watch')">自选<span class="wc-badge" id="watch-count" style="display:none">0</span><span class="wc-change-badge" id="watch-change" style="display:none">0</span></button>
+      <button class="wc-btn" id="history-btn" onclick="togglePanel('history')">历史<span class="wc-badge" id="history-count" style="display:none">0</span></button>
+      <div class="wp-panel" id="wp-panel">
+        <div class="wp-tabs">
+          <button class="wp-tab active" data-tab="watch" onclick="switchTab('watch')">自选股<span class="wp-tab-count" id="wt-count"></span></button>
+          <button class="wp-tab" data-tab="history" onclick="switchTab('history')">历史记录<span class="wp-tab-count" id="ht-count"></span></button>
+          <button class="wp-tab" data-tab="overview" onclick="switchTab('overview')">多股一览<span class="wp-tab-count" id="ov-count"></span></button>
+        </div>
+        <div class="wp-list" id="wp-content-watch"></div>
+        <div class="wp-list" id="wp-content-history" style="display:none"></div>
+        <div class="wp-list" id="wp-content-overview" style="display:none"></div>
+        <div class="wp-footer" id="wp-footer" style="display:none">
+          <span class="wp-footer-info" id="wp-footer-info"></span>
+          <button class="wp-clear" id="wp-clear-btn" onclick="clearCurrentTab()">清空</button>
+        </div>
       </div>
     </div>
   </div>
@@ -750,8 +797,8 @@ body {
       <div id="minute-vol"></div>
       <div class="flow-section" id="flow-section">
         <div class="fs-title">
-          <span style="color:#ff9800">资金流向</span>
-          <span id="flow-summary"></span>
+          <span class="flow-heading">资金流向</span>
+          <div id="flow-summary"></div>
           <span class="flow-toggle">
             <button class="ft-btn ft-active" id="ft-rt" onclick="switchFlowMode('realtime')">今日实时</button>
             <button class="ft-btn" id="ft-daily" onclick="switchFlowMode('daily')">近30日</button>
@@ -763,7 +810,7 @@ body {
         <div id="flow-details" hidden>
           <details id="flow-details-toggle">
             <summary id="flow-details-title"></summary>
-            <div id="flow-details-scroll" style="max-height:160px;overflow:auto">
+            <div id="flow-details-scroll" tabindex="0" aria-label="资金流明细，可滚动查看">
               <table><thead id="flow-details-head"></thead><tbody id="flow-details-rows"></tbody></table>
             </div>
           </details>
@@ -983,12 +1030,21 @@ function initCharts() {
   minuteVolChart.setOption(opts);
   indicatorChart.setOption(opts);
 
-  const chartResizeObserver = new ResizeObserver(() => {
-    klineChart.resize(); volumeChart.resize(); flowChart.resize();
-    minuteChart.resize(); minuteVolChart.resize();
-    indicatorChart.resize();
+  const chartResizeObserver = new ResizeObserver(entries => {
+    for (const entry of entries) {
+      if (entry.contentRect.width && entry.contentRect.height) {
+        echarts.getInstanceByDom(entry.target).resize();
+      }
+    }
   });
-  chartResizeObserver.observe(document.querySelector('.main'));
+  for (const chart of [klineChart, volumeChart, flowChart, minuteChart, minuteVolChart, indicatorChart]) {
+    chartResizeObserver.observe(chart.getDom());
+  }
+  document.getElementById('flow-details-toggle').addEventListener('toggle', event => {
+    if (event.target.open) {
+      document.getElementById('flow-details-scroll').scrollIntoView({block: 'nearest'});
+    }
+  });
 
   // 视图切换
   document.getElementById('view-dayk').onclick = () => switchView('dayk');
@@ -1231,7 +1287,7 @@ function renderKline(klines, signal = {}) {
       axisLabel: { color: C.textDim, fontSize: 11 },
       splitLine: { lineStyle: { color: C.grid } },
     },
-    grid: { left: 60, right: 50, top: 30, bottom: 50 },
+    grid: { left: 60, right: 50, top: 30, bottom: 60 },
     legend: {
       data: ['MA5','MA10','MA20','MA60'],
       top: 4, left: 60,
@@ -1282,7 +1338,7 @@ function renderKline(klines, signal = {}) {
     },
     dataZoom: [
       { type: 'inside', start: ds, end: 100, zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false },
-      { type: 'slider', start: ds, end: 100, height: 28, bottom: 8,
+      { type: 'slider', start: ds, end: 100, height: 24, bottom: 8,
         borderColor: '#222', backgroundColor: '#0a0a0a',
         fillerColor: 'rgba(255,152,0,0.1)',
         selectedDataBackground: { lineStyle: { color: C.ma60 }, areaStyle: { color: 'rgba(255,152,0,0.15)' } },
@@ -1844,6 +1900,13 @@ const FLOW_COLUMNS = [
   ['medium_net', '中单'], ['small_net', '小单'],
 ];
 
+function flowMetricHtml(label, value, detail = '') {
+  const available = Number.isFinite(value);
+  const color = !available || value === 0 ? 'flat' : value > 0 ? 'up' : 'down';
+  const amount = available ? `${value >= 0 ? '+' : ''}${(value / 1e8).toFixed(2)}亿` : '未提供';
+  return `<div class="flow-metric"><div class="flow-metric-main"><span>${escHtml(label)}</span><b class="${color}">${amount}</b></div>${detail ? `<span class="flow-metric-detail">${escHtml(detail)}</span>` : ''}</div>`;
+}
+
 function renderFlowDetails(flows, realtime = false) {
   const el = document.getElementById('flow-details');
   el.hidden = !flows?.length;
@@ -1852,7 +1915,7 @@ function renderFlowDetails(flows, realtime = false) {
   const scrollTop = scroll.scrollTop;
   document.getElementById('flow-details-title').textContent = `查看${realtime ? '分时累计明细' : '逐日数值'}（${flows.length}条，单位：万元）`;
   document.getElementById('flow-details-head').innerHTML = `<tr><th>${realtime ? '时间' : '日期'}</th>${FLOW_COLUMNS.map(([, label]) => `<th>${label}净额</th>`).join('')}</tr>`;
-  document.getElementById('flow-details-rows').innerHTML = flows.map(f => `<tr><td>${escHtml(realtime ? f.time : f.date)}</td>${FLOW_COLUMNS.map(([key]) => `<td>${Number.isFinite(f[key]) ? (f[key] / 1e4).toFixed(2) : '未提供'}</td>`).join('')}</tr>`).join('');
+  document.getElementById('flow-details-rows').innerHTML = flows.map(f => `<tr><td>${escHtml(realtime ? f.time : f.date)}</td>${FLOW_COLUMNS.map(([key]) => `<td class="${!Number.isFinite(f[key]) || f[key] === 0 ? 'flat' : f[key] > 0 ? 'up' : 'down'}">${Number.isFinite(f[key]) ? (f[key] / 1e4).toFixed(2) : '未提供'}</td>`).join('')}</tr>`).join('');
   scroll.scrollTop = scrollTop;
 }
 
@@ -1881,9 +1944,9 @@ function _renderDailyFlow(flows, status = {}) {
   }
   const recent = flows.slice(-5);
   const totalMain = recent.reduce((sum, flow) => sum + flow.main_net, 0);
-  const totalMainYi = (totalMain / 1e8).toFixed(2);
   const latest = flows.at(-1);
-  fs.innerHTML = `最近${recent.length}个资金流交易日主力合计 <span style="color:${totalMain >= 0 ? C.up : C.down};font-weight:bold">${totalMain >= 0 ? '+' : ''}${totalMainYi}亿</span>（${escHtml(recent[0].date)}~${escHtml(latest.date)}）<br>${escHtml(latest.date)} 单日主力净额 ${(latest.main_net / 1e8).toFixed(2)}亿 · ${escHtml(status.source || latest.source || '东方财富')}`;
+  fs.innerHTML = flowMetricHtml(`最近${recent.length}个资金流交易日主力合计`, totalMain, `${recent[0].date}~${latest.date}`)
+    + flowMetricHtml('单日主力净额', latest.main_net, `${latest.date} · ${status.source || latest.source || '东方财富'}`);
   const lastDate = status.data_through || flows.at(-1).date;
   const reference = status.reference_date || _klineData.at(-1)?.date;
   const lagging = reference && lastDate < reference;
@@ -2008,11 +2071,13 @@ function renderRealtimeFlow(data) {
     return;
   }
   const summary = data.summary || {};
-  fs.innerHTML = `${data.stale ? '[刷新失败，旧数据] ' : ''}${escHtml(data.data_date || '数据日期未提供')} ${data.is_today ? '今日单日累计' : '该交易日累计'}<br>` + FLOW_COLUMNS.map(([key, label]) => `${label} <span style="color:${summary[key] >= 0 ? C.up : C.down};font-weight:bold">${Number.isFinite(summary[key]) ? (summary[key] >= 0 ? '+' : '') + (summary[key] / 1e8).toFixed(2) + '亿' : '未提供'}</span>`).join(' | ');
+  fs.innerHTML = `<div class="flow-period">${escHtml(data.data_date || '数据日期未提供')}<span>${data.is_today ? '今日单日累计' : '该交易日累计'}</span>${data.stale ? '<span class="flow-stale">刷新失败，显示旧数据</span>' : ''}</div>`
+    + FLOW_COLUMNS.map(([key, label]) => flowMetricHtml(label, summary[key])).join('');
   renderFlowDetails(data.flows, true);
   const referenceDate = _klineData.at(-1)?.date;
   const behind = data.data_date && referenceDate && data.data_date < referenceDate;
-  document.getElementById('flow-meta').textContent = `${data.session_note ? data.session_note + '；' : ''}数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '来源未提供'}${data.source_note ? '；' + data.source_note : ''}；${data.accounting_note || '主力净额 = 超大单净额 + 大单净额'}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}；下次自动刷新 ${nextTime}`;
+  const metaText = `${data.session_note ? data.session_note + '；' : ''}数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '来源未提供'}${data.source_note ? '；' + data.source_note : ''}；${data.accounting_note || '主力净额 = 超大单净额 + 大单净额'}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}`;
+  document.getElementById('flow-meta').innerHTML = `${escHtml(metaText)}；<span class="flow-refresh">下次自动刷新 ${escHtml(nextTime)}</span>`;
   const flows = data.flows;
   const mainNet = flows.map(f => +(f.main_net / 1e8).toFixed(4));
   flowChart.setOption({

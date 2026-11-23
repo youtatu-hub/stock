@@ -73,12 +73,12 @@ test('实时图显示实际来源和统计口径，切源时整组替换', () =>
     data_date:'2026-11-16', as_of:'2026-11-16 15:00', fetched_at:'2026-11-16T07:00:01Z',
     flows:[{time:'09:31', main_net:5000, super_large_net:3000},{time:'15:00', main_net:10000, super_large_net:6000}],
     summary:{main_net:10000, super_large_net:6000}})`);
-  assert.match(page.nodes.get('flow-meta').textContent, /腾讯.*按腾讯口径统计/);
+  assert.match(page.nodes.get('flow-meta').innerHTML, /腾讯.*按腾讯口径统计/);
   assert.equal(page.chart.option.series[0].data[1].value, 0.0001);
   page.run(`renderRealtimeFlow({source:'东方财富', data_date:'2026-11-16',
     flows:[{time:'15:00', main_net:-10000, super_large_net:-6000}],
     summary:{main_net:-10000, super_large_net:-6000}})`);
-  assert.match(page.nodes.get('flow-meta').textContent, /东方财富/);
+  assert.match(page.nodes.get('flow-meta').innerHTML, /东方财富/);
   assert.equal(page.chart.option.series[0].data.length, 1);
   assert.equal(page.chart.option.series[0].data[0].value, -0.0001);
 });
@@ -89,8 +89,8 @@ test('盘前说明、五类资金和分时明细同时展示', () => {
     session_note:'今日尚未进入连续交易，显示最近可用交易日 2026-11-16 的数据',
     flows:[{time:'15:00', main_net:6000000,super_large_net:-683000000,large_net:689000000,medium_net:-2000000,small_net:-4000000}],
     summary:{main_net:6000000,super_large_net:-683000000,large_net:689000000,medium_net:-2000000,small_net:-4000000}})`);
-  assert.match(page.nodes.get('flow-meta').textContent, /今日尚未进入连续交易/);
-  assert.match(page.nodes.get('flow-meta').textContent, /主力净额 = 超大单净额 \+ 大单净额/);
+  assert.match(page.nodes.get('flow-meta').innerHTML, /今日尚未进入连续交易/);
+  assert.match(page.nodes.get('flow-meta').innerHTML, /主力净额 = 超大单净额 \+ 大单净额/);
   assert.match(page.nodes.get('flow-summary').innerHTML, /大单.*\+6.89亿.*中单.*小单/);
   assert.match(page.nodes.get('flow-details-title').textContent, /分时累计明细/);
   assert.match(page.nodes.get('flow-details-rows').innerHTML, /15:00.*68900\.00/s);
