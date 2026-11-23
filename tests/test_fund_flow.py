@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from analysis.volume_price_module import _analyze_fund_flow
 from data import kline_fetcher as fetcher
-from data.fund_flow_service import RealtimeFlowService, history_status
+from data.fund_flow_service import RealtimeFlowService, analysis_snapshot, history_status
 from data.request_runtime import collect_stages
 
 
@@ -106,6 +106,49 @@ class FundFlowTests(unittest.TestCase):
         self.assertEqual(stale["source"], "腾讯")
         self.assertEqual(stale["summary"], good["summary"])
         self.assertEqual(stale["fetched_at"], good["fetched_at"])
+        self.assertTrue(stale["summary_available"])
+        self.assertIn("旧快照", stale["availability_note"])
+
+    def test_analysis_reference_keeps_page_version_after_refresh_and_preserves_stale_time(self):
+        service = RealtimeFlowService()
+        first = service.snapshot("513300", lambda _: [self.minute()])
+        second = service.snapshot("513300", lambda _: [replace(self.minute(), main_net=20000)], force=True)
+        self.assertNotEqual(first["snapshot_id"], second["snapshot_id"])
+        reference = {"id": first["snapshot_id"], "status": first["status"]}
+        self.assertEqual(service.for_analysis("513300", reference), analysis_snapshot(first))
+        stale = service.for_analysis("513300", {**reference, "status": "stale"})
+        self.assertTrue(stale["stale"])
+        self.assertEqual(stale["summary"], first["summary"])
+        self.assertEqual(stale["as_of"], first["as_of"])
+        self.assertIn("旧快照", stale["availability_note"])
+        with self.assertRaisesRegex(ValueError, "品种"):
+            service.for_analysis("159941", reference)
+        with self.assertRaisesRegex(ValueError, "状态"):
+            service.for_analysis("513300", {**reference, "status": "unavailable"})
+        with patch("data.fund_flow_service.FLOW_SNAPSHOT_SECONDS", -1), self.assertRaisesRegex(ValueError, "过期"):
+            service.for_analysis("513300", reference)
+
+    def test_page_without_snapshot_and_last_minute_gap_do_not_claim_available_cumulative(self):
+        service = RealtimeFlowService()
+        missing = service.for_analysis("513300", {"id": None, "status": "error"})
+        self.assertFalse(missing["summary_available"])
+        self.assertEqual(missing["minute_status"], "unavailable")
+        self.assertFalse(missing["summary"])
+        data = service.snapshot("513300", lambda _: [
+            replace(self.minute(), time="14:59"), replace(self.minute(), available=False, quality_note="不可核验")])
+        self.assertFalse(data["summary_available"])
+        self.assertTrue(all(value is None for value in data["summary"].values()))
+        self.assertEqual(data["missing_ranges"][0]["start"], "15:00")
+
+    def test_daily_history_not_requested_is_distinct_from_failed_fetch(self):
+        not_requested = history_status([], requested=False)
+        unavailable = history_status([])
+        self.assertEqual(not_requested["status"], "not_requested")
+        self.assertIsNone(not_requested["available"])
+        self.assertFalse(not_requested["requested"])
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertFalse(unavailable["available"])
+        self.assertTrue(unavailable["requested"])
 
     def test_latest_single_day_and_five_day_sum_have_distinct_dates(self):
         dates = ["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12"]
@@ -196,6 +239,19 @@ class TencentFlowTests(unittest.TestCase):
                 patch.object(fetcher, "_get_flow_json", side_effect=OSError("push2：HTTP 502")):
             with self.assertRaisesRegex(OSError, "腾讯.*东方财富.*502"):
                 fetcher.fetch_realtime_flow("513300")
+
+    def test_partial_sources_are_selected_as_whole_series_without_regressing_last_minute(self):
+        gap = fetcher.MinuteFlow("09:31", 0, 1000, 1000, 4000, -6000, date="2026-11-16",
+                                source="腾讯", available=False, quality_note="主力占位")
+        final = replace(gap, time="15:00", main_net=-2000, available=True, quality_note="")
+        primary = [gap, final]
+        for backup, expected in (([replace(final, source="东方财富", time="14:59")], primary),
+                                 ([replace(final, source="东方财富", main_net=-3000)], None)):
+            with patch.object(fetcher, "_fetch_realtime_flow_tencent", return_value=primary), \
+                    patch.object(fetcher, "_fetch_realtime_flow_eastmoney", return_value=backup):
+                result = fetcher.fetch_realtime_flow("513300")
+            self.assertEqual(result, expected if expected is not None else backup)
+            self.assertEqual(len({row.source for row in result}), 1)
 
     def test_slow_primary_http_leaves_time_for_backup(self):
         release = threading.Event()

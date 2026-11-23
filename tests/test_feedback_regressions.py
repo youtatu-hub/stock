@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 import app
 from data import etf_premium, kline_fetcher as fetcher
 from data.ai_client import AIClient, normalize_base_url
-from data.fund_flow_service import RealtimeFlowService
+from data.fund_flow_service import RealtimeFlowService, analysis_snapshot, history_status
 from data.instruments import get_instrument
 from data.market_breadth import MarketBreadthCache
 from data.market_time import SHANGHAI
@@ -20,27 +20,53 @@ from test_asset_profiles import bars, premium_payload
 
 
 class FlowAndQuoteRegressionTests(unittest.TestCase):
-    def test_opening_hour_main_placeholder_uses_verified_same_source_components(self):
+    def test_opening_hour_main_placeholder_remains_a_gap_without_component_backfill(self):
         start = datetime(2026, 11, 23, 9, 31)
         rows = [{"time": (start + timedelta(minutes=i)).strftime("%Y%m%d%H%M"),
                  "MainNetInflow": "0", "SuperNetInflow": "-6000", "BigNetInflow": "4000",
                  "NormalNetInflow": "1000", "SmallNetInflow": "1000",
-                 "MainInflow": "10000", "MainOutflow": "12000"} for i in range(61)]
+                 "MainInflow": "10000", "MainOutflow": "12000"} for i in range(59)]
+        rows.extend([{**rows[0], "time": "202611231030", "MainNetInflow": "-2000"},
+                     {**rows[0], "time": "202611231500", "MainNetInflow": "-1000", "BigNetInflow": "5000"}])
         payload = {"code": 0, "data": {"todayFundTrend": {"stockCode": "sz159941", "minList": rows}}}
         with patch.object(fetcher, "_cache_get", return_value=None), patch.object(fetcher, "_cache_set"), \
                 patch.object(fetcher, "flow_session_status", return_value={"session_state": "today"}), \
                 patch.object(fetcher, "_http_get", return_value=Mock(json=lambda: payload)), \
-                patch.object(fetcher, "_fetch_realtime_flow_eastmoney") as backup:
+                patch.object(fetcher, "_fetch_realtime_flow_eastmoney", return_value=[]) as backup:
             result = fetcher.fetch_realtime_flow("159941")
-        backup.assert_not_called()
+        backup.assert_called_once_with("159941")
         self.assertEqual(result[0].time, "09:31")
-        self.assertTrue(all(row.main_net == -2000 for row in result))
-        self.assertEqual(result[-1].super_large_net, -6000)  # 累计平台保持原值。
-        self.assertIn("核对", result[0].quality_note)
-        for change in ({"MainOutflow": "13000"}, {"MainInflow": None}, {"MainNetInflow": "100"}):
-            rows[0].update(change)
+        self.assertEqual(result[58].time, "10:29")
+        self.assertTrue(all(row.main_net == 0 and not row.available for row in result[:59]))
+        self.assertIn("未用分项补值", result[0].quality_note)
+        response = RealtimeFlowService().snapshot("159941", lambda _: result)
+        self.assertEqual((response["status"], response["minute_status"], response["missing_count"]), ("partial", "partial", 59))
+        gap = response["missing_ranges"][0]
+        self.assertEqual((gap["start"], gap["end"], gap["count"]), ("09:31", "10:29", 59))
+        for row in response["flows"][:59]:
+            for key in ("main_net", "super_large_net", "large_net", "medium_net", "small_net"):
+                self.assertIsNone(row[key])
+        self.assertEqual(response["flows"][59]["main_net"], -2000)
+        self.assertTrue(response["summary_available"])
+        self.assertEqual(response["summary"]["main_net"], -1000)
+        self.assertEqual(response["summary"]["super_large_net"], -6000)
+        original = rows[0]
+        for change in ({"MainNetInflow": "100"}, {"BigNetInflow": "nan"}):
+            rows[0] = {**original, **change}
             with patch.object(fetcher, "_http_get", return_value=Mock(json=lambda: payload)), self.assertRaises(ValueError):
                 fetcher._fetch_realtime_flow_tencent("159941")
+
+    def test_valid_cumulative_plateau_and_larger_opening_outflow_remain_available(self):
+        stamps = ["0931", "1456", "1457", "1458", "1459", "1500"]
+        nets = [-20000, -9000, -9000, -9000, -9000, -8000]
+        rows = [{"time": f"20261123{stamp}", "MainNetInflow": str(net),
+                 "SuperNetInflow": "-25000", "BigNetInflow": str(net + 25000),
+                 "NormalNetInflow": "0", "SmallNetInflow": str(-net)} for stamp, net in zip(stamps, nets)]
+        payload = {"code": 0, "data": {"todayFundTrend": {"stockCode": "sh513300", "minList": rows}}}
+        with patch.object(fetcher, "_http_get", return_value=Mock(json=lambda: payload)):
+            result = fetcher._fetch_realtime_flow_tencent("513300")
+        self.assertTrue(all(row.available for row in result))
+        self.assertEqual([row.main_net for row in result], nets)
 
     def test_backup_opening_zero_placeholder_is_gap_and_bad_amount_is_not_zero(self):
         start = datetime(2026, 11, 23, 9, 31)
@@ -123,7 +149,12 @@ class PremiumRegressionTests(unittest.TestCase):
         snapshot = etf_premium.parse_tencent_snapshot('v_sh513500="' + "~".join(fields) + '";', "513500")
         self.assertEqual(snapshot["iopv"], 1)
         self.assertEqual(snapshot["premium_pct"], 20)
-        self.assertFalse(etf_premium.snapshot_status(snapshot, datetime.fromisoformat(snapshot["quote_time"]))["alert_eligible"])
+        current = etf_premium.snapshot_status(snapshot, datetime.fromisoformat(snapshot["quote_time"]))
+        self.assertEqual(current["status"], "unavailable")
+        self.assertIsNone(current["iopv"])
+        self.assertIsNone(current["premium_pct"])
+        self.assertEqual(current["reported_reference"]["value"], 1)
+        self.assertFalse(current["alert_eligible"])
         self.assertEqual(snapshot["source"], "腾讯")
 
     def test_upstream_failures_keep_reference_time_and_nav_uses_separate_quote(self):
@@ -136,6 +167,9 @@ class PremiumRegressionTests(unittest.TestCase):
         self.assertEqual(stale["fetched_at"], snapshot["fetched_at"])
         self.assertEqual(stale["quote_time"], snapshot["quote_time"])
         self.assertFalse(stale["alert_eligible"])
+        self.assertIsNone(stale["iopv"])
+        self.assertIsNone(stale["premium_pct"])
+        self.assertFalse(stale["reported_reference"]["usable_for_analysis"])
         quote = fetcher.Quote("513500", "测试", 1.2, 0, 0, 1, 1, 1, 1, 1, 1, 1)
         nav = {"history": [{"date": "2026-01-02", "nav": 1}], "source": "fixture", "source_url": "", "fetched_at": ""}
         with patch.object(app, "fetch_etf_premium", side_effect=OSError("IOPV缺失")), \
@@ -143,6 +177,54 @@ class PremiumRegressionTests(unittest.TestCase):
             result = app.handle_etf_premium({"symbol": ["513500"]})
         self.assertEqual(result["disclosed_nav"]["premium_pct"], 20)
         self.assertIsNone(result["iopv"])
+
+
+class AIFlowContextTests(unittest.TestCase):
+    def test_five_overseas_etfs_use_page_snapshot_and_separate_three_flow_states(self):
+        service = RealtimeFlowService()
+        rows = [fetcher.MinuteFlow("09:31", 0, 1000, 1000, 4000, -6000, date="2026-11-23",
+                                  source="腾讯", available=False, quality_note="原始主力缺失"),
+                fetcher.MinuteFlow("15:00", -2000, 1000, 1000, 4000, -6000, date="2026-11-23", source="腾讯")]
+        premium = etf_premium.snapshot_status(etf_premium.parse_etf_snapshot(premium_payload(), "513500"))
+        for symbol in ("513500", "513300", "159501", "159941", "513100"):
+            with self.subTest(symbol=symbol):
+                page = service.snapshot(symbol, lambda _: rows)
+                # 页面提交快照编号后服务已刷新，模型仍须读取页面那一版。
+                service.snapshot(symbol, lambda _: [replace(rows[-1], main_net=5000, large_net=11000)], force=True)
+                with patch.object(app, "realtime_flow_service", service), \
+                        patch.object(app, "AIClient") as client_factory, \
+                        patch.object(app, "handle_analyze", return_value={"symbol": symbol, "flow_status": history_status([], requested=False)}), \
+                        patch.object(app, "handle_etf_premium", return_value={"iopv": premium}), \
+                        patch.object(app, "handle_realtime_flow", side_effect=AssertionError("不得另取一版实时流")):
+                    client = client_factory.return_value
+                    client.model = "fixture-model"
+                    client.analyze.return_value = "fixture"
+                    result = app.handle_ai_analysis({"symbol": symbol, "flow_snapshot": {"id": page["snapshot_id"], "status": page["status"]}})
+                context = client.analyze.call_args.args[0]
+                realtime = context["fund_flow"]["realtime"]
+                self.assertEqual(realtime, analysis_snapshot(page))
+                self.assertTrue(realtime["summary_available"])
+                self.assertEqual(realtime["summary"]["main_net"], -2000)
+                self.assertEqual((realtime["minute_status"], realtime["missing_count"]), ("partial", 1))
+                daily = context["fund_flow"]["daily_history"]
+                self.assertEqual(daily["status"], "not_requested")
+                self.assertIsNone(daily["available"])
+                self.assertNotIn("flow_status", context)
+                self.assertEqual(result["fund_flow"], context["fund_flow"])
+                self.assertIsNone(context["premium_reference"]["iopv"]["iopv"])
+                self.assertNotIn("reported_reference", context["premium_reference"]["iopv"])
+
+    def test_api_without_page_reference_uses_shared_realtime_handler(self):
+        page = RealtimeFlowService().snapshot("600000", lambda _: [])
+        with patch.object(app, "AIClient") as client_factory, \
+                patch.object(app, "handle_analyze", return_value={"symbol": "600000", "flow_status": history_status([])}), \
+                patch.object(app, "handle_realtime_flow", return_value=page) as realtime:
+            client_factory.return_value.model = "fixture-model"
+            client_factory.return_value.analyze.return_value = "fixture"
+            result = app.handle_ai_analysis({"symbol": "600000"})
+        realtime.assert_called_once_with({"symbol": ["600000"]})
+        self.assertEqual(result["fund_flow"]["realtime"], analysis_snapshot(page))
+        self.assertEqual(result["fund_flow"]["daily_history"]["status"], "unavailable")
 
 
 class CPAIntegrationTests(unittest.TestCase):
@@ -188,7 +270,8 @@ class CPAIntegrationTests(unittest.TestCase):
         self.assertNotIn("base_url", listing)
         self.assertNotIn("api_key", listing)
         with patch.object(app, "handle_analyze", return_value={"symbol": "600000", "signal": {"action": "谨慎买入"}}):
-            result = app.handle_ai_analysis({"model": "fixture-model", "symbol": "600000"})
+            result = app.handle_ai_analysis({"model": "fixture-model", "symbol": "600000",
+                                            "flow_snapshot": {"id": None, "status": "error"}})
         self.assertIn("强势", result["text"])
         self.assertEqual([call[0] for call in self.calls], ["/v1/models", "/v1/chat/completions"])
         self.assertTrue(all(call[1] == "Bearer fixture-key" for call in self.calls))

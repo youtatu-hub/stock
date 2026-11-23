@@ -116,6 +116,57 @@ test('刷新列表后保留有效选择并更新解读，失败可明确重试',
   assert.equal(panel.refreshButton.disabled,false);
 });
 
+test('等待页面快照后生成，普通金额刷新不重复调用，状态改变重新解读',async()=>{
+  const page=setup(), panel=page.panel;
+  panel.modelsReady=true;panel.model.value='alpha';
+  panel.setTarget({...instrument('513300'),fund_flow:true},'day');
+  page.flush();
+  assert.equal(page.requests.length,0);
+  assert.match(panel.status.textContent,/等待页面资金流/);
+  const flow={snapshot_id:'a'.repeat(32),status:'partial',summary_available:true,minute_status:'partial',source:'腾讯',
+    data_date:'2026-11-23',as_of:'2026-11-23 15:00',summary:{main_net:-2000},
+    availability_note:'实时累计可用；分钟序列局部缺失'};
+  panel.setFlowSnapshot('159941',flow);
+  page.flush();
+  assert.equal(page.requests.length,0);
+  panel.setFlowSnapshot('513300',flow);
+  page.flush();
+  assert.deepEqual(JSON.parse(page.requests[0].options.body).flow_snapshot,{id:flow.snapshot_id,status:'partial'});
+  const newer={...flow,snapshot_id:'b'.repeat(32),summary:{main_net:-1000}};
+  panel.setFlowSnapshot('513300',newer);
+  page.flush();
+  assert.equal(page.requests.length,1);
+  page.requests[0].resolve({...payload('513300'),fund_flow:{realtime:flow,daily_history:{availability_note:'日级历史未请求'}}});
+  await new Promise(setImmediate);
+  assert.match(panel.dataState.textContent,/实时累计可用；分钟序列局部缺失；日级历史未请求；资金流截至 2026-11-23 15:00 · 腾讯/);
+  panel.setFlowSnapshot('513300',{...newer,status:'stale',stale:true});
+  page.flush();
+  assert.deepEqual(JSON.parse(page.requests[1].options.body).flow_snapshot,{id:newer.snapshot_id,status:'stale'});
+  panel.setFlowSnapshot('513300',newer);
+  page.flush();
+  assert.equal(page.requests.length,3);
+  assert.equal(JSON.parse(page.requests[2].options.body).flow_snapshot.status,'partial');
+});
+
+test('日级模式不等待实时渲染；实时获取失败也把页面不可用状态交给模型',()=>{
+  const page=setup(), panel=page.panel;
+  panel.modelsReady=true;panel.model.value='alpha';
+  panel.setTarget({...instrument('513300'),fund_flow:true},'day','daily');
+  page.flush();
+  assert.equal(page.requests.length,1);
+  assert.equal('flow_snapshot' in JSON.parse(page.requests[0].options.body),false);
+  panel.setFlowMode('realtime');
+  page.flush();
+  assert.equal(page.requests.length,1);
+  panel.setFlowSnapshot('513300',{status:'error',flows:[]});
+  page.flush();
+  assert.deepEqual(JSON.parse(page.requests[1].options.body).flow_snapshot,{id:null,status:'error'});
+  panel.setFlowMode('daily');
+  page.flush();
+  assert.equal(page.requests.length,3);
+  assert.equal('flow_snapshot' in JSON.parse(page.requests[2].options.body),false);
+});
+
 test('CPA卡片仅提供模型选择和刷新按钮',()=>{
   const html=fs.readFileSync(require.resolve('../dashboard/index.html'),'utf8');
   const card=html.slice(html.indexOf('id="ai-card"'),html.indexOf('id="premium-card"'));

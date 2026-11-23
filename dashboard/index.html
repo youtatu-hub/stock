@@ -707,6 +707,9 @@ body {
 .asset-error, .asset-warning { color: #ffc107; background: #332708; border-radius: 5px; padding: 8px; font-size: 12px; line-height: 1.6; }
 .asset-metrics .premium-alert { color: #ffb74d; font-weight: bold; }
 .premium-nav { border-top: 1px solid #303030; margin-top: 12px; }
+.premium-nav:first-child { border-top: 0; margin-top: 0; }
+.premium-reference { margin-top: 12px; color: #8593a5; font-size: 11px; }
+.premium-reference summary { cursor: pointer; line-height: 1.7; }
 .premium-settings { padding: 8px 12px 0; font-size: 12px; color: #aaa; }
 .premium-settings input { width: 62px; color: #ddd; background: #171717; border: 1px solid #444; border-radius: 4px; padding: 4px; }
 #premium-body, #fund-terms { padding: 0 12px 10px; }
@@ -752,6 +755,8 @@ body {
 .ai-insight-risk .ai-section-title::before { background: #d3b28b; }
 .ai-insight-conditions { padding-top: 12px; border-top: 1px solid #9ab4d215; }
 .ai-output:empty::before { content: '解读将在这里自动呈现'; display: block; padding: 20px 0; color: #657c9a; text-align: center; }
+.ai-data-state { color: #8fa5c0; font-size: 10px; line-height: 1.7; margin-top: 12px; }
+.ai-data-state:empty { display: none; }
 .ai-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 16px; padding-top: 10px; border-top: 1px solid #9ab4d215; color: #7085a1; font-size: 10px; line-height: 1.5; }
 .ai-footer time { white-space: nowrap; font-variant-numeric: tabular-nums; }
 #ai-card[data-state="loading"] .ai-progress, #ai-card[data-state="analyzing"] .ai-progress { display: inline-block; }
@@ -882,6 +887,7 @@ body {
         </div>
         <div class="ai-status" role="status"><span class="ai-progress" aria-hidden="true"></span><span data-ai-status>正在加载可用模型…</span></div>
         <div class="ai-result"><div class="ai-output" data-ai-output aria-live="polite"></div></div>
+        <div class="ai-data-state" data-ai-data-state></div>
         <div class="ai-footer"><span data-ai-context>切换品种或模型后自动更新</span><time data-ai-time aria-label="北京时间生成时间"></time></div>
       </div>
     </div>
@@ -2043,6 +2049,7 @@ function stopFlowRequests() {
 function switchFlowMode(mode) {
   stopFlowRequests();
   _flowMode = mode;
+  aiPanel.setFlowMode(mode);
   document.getElementById('flow-heading').textContent = mode === 'realtime' ? '资金流向 · 今日实时' : '资金流向 · 近30日';
   document.getElementById('ft-rt').classList.toggle('ft-active', mode === 'realtime');
   document.getElementById('ft-daily').classList.toggle('ft-active', mode === 'daily');
@@ -2113,7 +2120,7 @@ async function loadRealtimeFlow(symbol, force = false) {
       retrySeconds = Math.max(1, data?.retry_after_seconds || 30);
       if (!data.flows?.length && session.lastRealtimeFlow && Date.now() - Date.parse(session.lastRealtimeFlow.fetched_at) <= 300000) {
         data = {...session.lastRealtimeFlow, status: 'stale', stale: true, message: data.message,
-          checked_at: data.checked_at, retry_after_seconds: retrySeconds};
+          availability_note: '', checked_at: data.checked_at, retry_after_seconds: retrySeconds};
       }
       if (data.flows?.length && !data.stale) session.lastRealtimeFlow = data;
       renderRealtimeFlow(data);
@@ -2125,6 +2132,7 @@ async function loadRealtimeFlow(symbol, force = false) {
 }
 
 function renderRealtimeFlow(data) {
+  aiPanel.setFlowSnapshot(currentSymbol, data);
   const fs = document.getElementById('flow-summary');
   const retrySeconds = data.retry_after_seconds || 30;
   const nextTime = new Date(Date.now() + retrySeconds * 1000).toLocaleTimeString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
@@ -2142,7 +2150,8 @@ function renderRealtimeFlow(data) {
   const referenceDate = _klineData.at(-1)?.date;
   const behind = data.data_date && referenceDate && data.data_date < referenceDate;
   const metaText = `${data.session_note ? data.session_note + '；' : ''}数据截至 ${data.as_of || '未知'}；成功获取 ${formatDataTime(data.fetched_at)} · ${data.source || '来源未提供'}${data.source_note ? '；' + data.source_note : ''}；${data.accounting_note || '主力净额 = 超大单净额 + 大单净额'}${behind ? '；数据日期落后于K线截至 ' + referenceDate : ''}${data.stale ? '；刷新失败，保留最近成功结果：' + (data.message || '') : ''}`;
-  document.getElementById('flow-meta').innerHTML = `${escHtml(metaText)}${data.quality_note ? '；' + escHtml(data.quality_note) : ''}；<span class="flow-refresh">下次自动刷新 ${escHtml(nextTime)}</span>`;
+  const gaps = (data.missing_ranges || []).map(range => `${range.start}–${range.end}（${range.count}分钟）`).join('、');
+  document.getElementById('flow-meta').innerHTML = `${escHtml(metaText)}${data.availability_note ? '；' + escHtml(data.availability_note) : ''}${gaps ? '；缺失区间 ' + escHtml(gaps) : ''}${data.quality_note ? '；' + escHtml(data.quality_note) : ''}；<span class="flow-refresh">下次自动刷新 ${escHtml(nextTime)}</span>`;
   const flows = data.flows;
   const mainNet = flows.map(f => Number.isFinite(f.main_net) ? +(f.main_net / 1e8).toFixed(4) : null);
   flowChart.setOption({
@@ -2737,7 +2746,10 @@ function refreshPremiumPanel(session) {
   if (session.premiumData) {
     const input = document.getElementById('premium-threshold');
     const threshold = input.checkValidity() && input.value !== '' ? Number(input.value) : NaN;
-    document.getElementById('premium-body').innerHTML = premiumHtml(session.premiumData, threshold, escHtml);
+    const body = document.getElementById('premium-body');
+    const referenceOpen = body.querySelector('.premium-reference')?.open;
+    body.innerHTML = premiumHtml(session.premiumData, threshold, escHtml);
+    if (referenceOpen && body.querySelector('.premium-reference')) body.querySelector('.premium-reference').open = true;
   }
 }
 
@@ -2796,7 +2808,7 @@ async function analyze(symbol) {
   _lastSignalData = null;
   _currentStockName = '';
   const isFund = isFundSymbol(symbol);
-  aiPanel.setTarget(currentInstrument(), currentView === 'week' ? 'week' : 'day');
+  aiPanel.setTarget(currentInstrument(), currentView === 'week' ? 'week' : 'day', _flowMode);
   document.getElementById('stock-view').hidden = isFund;
   document.getElementById('load-status').hidden = isFund;
   document.getElementById('fund-view').hidden = !isFund;

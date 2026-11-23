@@ -868,7 +868,7 @@ class MinuteFlow:
 
 @data_stage
 def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
-    """腾讯优先、东财备用；每次只采用一个来源的完整分钟累计序列。"""
+    """腾讯优先、东财备用；每次采用一个来源的整组分钟累计序列，保留缺口。"""
     cache_key = f"rt_flow_{symbol}"
     cached = _cache_get(cache_key, _RT_CACHE_TTL)
     if cached is not None:
@@ -889,7 +889,8 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
                 if latest_date:
                     flows = [flow for flow in flows if flow.date == latest_date]
                 candidates.append(flows)
-                if flow_session_status(latest_date)["session_state"] != "awaiting_today":
+                if (len(candidates) == 1 and flow_session_status(latest_date)["session_state"] != "awaiting_today"
+                        and all(flow.available for flow in flows)):
                     _cache_set(cache_key, flows)
                     return flows
                 continue
@@ -899,7 +900,8 @@ def fetch_realtime_flow(symbol: str) -> List[MinuteFlow]:
             failures.append(f"{source}：{reason}")
             log.warning("flow_source_failed symbol=%s source=%s error=%s", symbol, source, exc)
     if candidates:
-        flows = max(candidates, key=lambda rows: (rows[-1].date, rows[-1].time))
+        flows = max(candidates, key=lambda rows: (rows[-1].date, rows[-1].time,
+                                                  rows[-1].available, -sum(not row.available for row in rows)))
         _cache_set(cache_key, flows)
         return flows
     if failures:
@@ -941,17 +943,17 @@ def _fetch_realtime_flow_tencent(symbol: str) -> List[MinuteFlow]:
             raise ValueError("分时资金流金额缺失或无效")
         component_net = amounts["super_large_net"] + amounts["large_net"]
         quality_note = ""
+        available = True
         if not math.isclose(amounts["main_net"], component_net, rel_tol=1e-5, abs_tol=1):
-            inflow, outflow = (_to_float(row.get(key)) for key in ("MainInflow", "MainOutflow"))
-            if (amounts["main_net"] != 0 or inflow is None or outflow is None
-                    or not all(math.isfinite(value) and value >= 0 for value in (inflow, outflow))
-                    or not math.isclose(inflow - outflow, component_net, rel_tol=1e-5, abs_tol=1)):
+            if amounts["main_net"] != 0:
                 raise ValueError("分时主力净额与超大单、大单之和不一致")
-            amounts["main_net"] = component_net
-            quality_note = "来源主力字段为零占位，按同源超大单与大单净额相加，并与主力流入减流出核对"
+            # 金额加总一致不能证明分项的分钟时点；零占位不得用重复分项补值。
+            available = False
+            quality_note = "原始主力字段为零且与分项不一致，该分钟金额不可核验，未用分项补值"
         # 上游字段已是累计净额，单位为元；不再次累加，也不混入东财分项。
         flows.append(MinuteFlow(time=moment.strftime("%H:%M"), date=moment.date().isoformat(),
-                                fetched_at=fetched_at, source="腾讯", quality_note=quality_note, **amounts))
+                                fetched_at=fetched_at, source="腾讯", quality_note=quality_note,
+                                available=available, **amounts))
     return flows
 
 

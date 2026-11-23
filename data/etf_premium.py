@@ -86,18 +86,37 @@ def parse_tencent_snapshot(text: str, symbol: str) -> dict:
 
 def snapshot_status(snapshot: dict, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
-    age = (now - datetime.fromisoformat(snapshot["quote_time"])).total_seconds()
+    quote_time = datetime.fromisoformat(snapshot["quote_time"])
+    age = (now - quote_time).total_seconds()
     fresh = 0 <= age <= SNAPSHOT_FRESH_SECONDS
     iopv_time = snapshot.get("iopv_time")
     iopv_age = (now - datetime.fromisoformat(iopv_time)).total_seconds() if iopv_time else None
     iopv_fresh = iopv_age is not None and 0 <= iopv_age <= SNAPSHOT_FRESH_SECONDS
-    oldest_time = min(datetime.fromisoformat(snapshot["quote_time"]), datetime.fromisoformat(iopv_time)) if iopv_time else datetime.fromisoformat(snapshot["quote_time"])
+    usable = fresh and iopv_fresh and snapshot["iopv"] is not None and snapshot["premium_pct"] is not None
+    if snapshot["iopv"] is None:
+        reason, note = "value_missing", "来源未提供IOPV数值"
+    elif snapshot["price"] is None:
+        reason, note = "price_missing", "来源未提供比较用价格，不能计算当前IOPV折溢价"
+    elif not iopv_time:
+        reason, note = "valuation_time_missing", "来源没有独立估值时间，无法提供可核验的实时IOPV"
+    elif not iopv_fresh:
+        reason, note = "valuation_time_invalid", "IOPV估值时间已过期或在未来，不能用于当前折溢价"
+    elif not fresh:
+        reason, note = "quote_time_invalid", "比较用价格已过期或在未来，不能计算当前折溢价"
+    else:
+        reason, note = "", "价格和IOPV均有可核验的独立时间"
+    oldest_time = min(quote_time, datetime.fromisoformat(iopv_time)) if iopv_time else quote_time
     return {**snapshot, "snapshot_fresh": fresh, "iopv_fresh": iopv_fresh,
-            "status": "unavailable" if snapshot["premium_pct"] is None else
-            "stale" if not fresh else "ok" if iopv_fresh else "unverified",
+            "status": "ok" if usable else "unavailable", "reason_code": reason, "note": note,
+            "iopv": snapshot["iopv"] if usable else None,
+            "premium_pct": snapshot["premium_pct"] if usable else None,
+            "reported_reference": {"value": snapshot["iopv"], "valuation_time": iopv_time,
+                                   "source": snapshot["source"], "source_url": snapshot["source_url"],
+                                   "source_price": snapshot["price"], "price_time": snapshot["quote_time"],
+                                   "fetched_at": snapshot.get("fetched_at"), "usable_for_analysis": usable},
             "age_seconds": max(0, round(age)),
             "fresh_until": (oldest_time + timedelta(seconds=SNAPSHOT_FRESH_SECONDS)).isoformat(),
-            "alert_eligible": fresh and iopv_fresh and snapshot["premium_pct"] is not None}
+            "alert_eligible": usable}
 
 
 @data_stage
@@ -137,6 +156,10 @@ def fetch_etf_premium(symbol: str) -> dict:
         error = "；".join(errors)
         _cache_set(key + "_error", error)
     if previous:
-        return {**snapshot_status(previous), "status": "stale", "stale": True,
-                "alert_eligible": False, "refresh_error": error}
+        result = snapshot_status(previous)
+        result.update(status="unavailable", stale=True, iopv=None, premium_pct=None,
+                      alert_eligible=False, refresh_error=error,
+                      reason_code="refresh_failed", note="来源刷新失败，旧参考值不能用于当前IOPV折溢价")
+        result["reported_reference"]["usable_for_analysis"] = False
+        return result
     raise OSError(error)

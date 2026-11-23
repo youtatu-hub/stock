@@ -155,15 +155,40 @@ class EtfPremiumTests(unittest.TestCase):
     def test_stale_future_and_missing_iopv_cannot_alert(self):
         result = etf_premium.parse_etf_snapshot(premium_payload(), "513500")
         stamp = datetime.fromisoformat(result["quote_time"])
-        self.assertFalse(etf_premium.snapshot_status(result, stamp + timedelta(seconds=60))["alert_eligible"])
-        self.assertEqual(etf_premium.snapshot_status(result, stamp)["status"], "unverified")
+        unknown_time = etf_premium.snapshot_status(result, stamp + timedelta(seconds=60))
+        self.assertFalse(unknown_time["alert_eligible"])
+        self.assertEqual(unknown_time["status"], "unavailable")
+        self.assertEqual(unknown_time["reason_code"], "valuation_time_missing")
+        self.assertIsNone(unknown_time["iopv"])
+        self.assertIsNone(unknown_time["premium_pct"])
+        self.assertEqual(unknown_time["reported_reference"]["value"], 1)
+        self.assertIsNone(unknown_time["reported_reference"]["valuation_time"])
+        self.assertFalse(unknown_time["reported_reference"]["usable_for_analysis"])
         verified = {**result, "iopv_time": result["quote_time"]}
         self.assertTrue(etf_premium.snapshot_status(verified, stamp + timedelta(seconds=60))["alert_eligible"])
         for offset in [-1, 121, 86400]:
-            self.assertFalse(etf_premium.snapshot_status(result, stamp + timedelta(seconds=offset))["alert_eligible"])
+            invalid = etf_premium.snapshot_status(verified, stamp + timedelta(seconds=offset))
+            self.assertFalse(invalid["alert_eligible"])
+            self.assertEqual(invalid["status"], "unavailable")
+            self.assertIsNone(invalid["iopv"])
+            self.assertIsNone(invalid["premium_pct"])
+        outdated = {**verified, "iopv_time": (stamp - timedelta(seconds=121)).isoformat()}
+        self.assertEqual(etf_premium.snapshot_status(outdated, stamp)["reason_code"], "valuation_time_invalid")
         missing = etf_premium.parse_etf_snapshot(premium_payload(f441="-", f402="-"), "513500")
         self.assertIsNone(missing["premium_pct"])
         self.assertFalse(etf_premium.snapshot_status(missing, stamp)["alert_eligible"])
+
+    def test_refresh_failure_invalidates_even_fresh_timestamped_reference(self):
+        snapshot = etf_premium.parse_etf_snapshot(premium_payload(), "513500")
+        stamp = datetime.now(timezone.utc).isoformat()
+        snapshot.update(quote_time=stamp, iopv_time=stamp)
+        with patch.object(etf_premium, "_cache_get", side_effect=lambda key, ttl: snapshot if ttl == 300 else "offline" if key.endswith("_error") else None):
+            result = etf_premium.fetch_etf_premium("513500")
+        self.assertTrue(result["stale"])
+        self.assertEqual(result["reason_code"], "refresh_failed")
+        self.assertIsNone(result["iopv"])
+        self.assertIsNone(result["premium_pct"])
+        self.assertFalse(result["reported_reference"]["usable_for_analysis"])
 
     def test_invalid_numbers_identity_dates_and_inconsistent_rates_fail(self):
         for change in [{"f12": "513100"}, {"f297": 20260106}, {"f402": 10}, {"f441": 0},

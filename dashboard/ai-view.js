@@ -78,6 +78,7 @@ class AIAnalysisPanel {
     this.output = root.querySelector('[data-ai-output]');
     this.context = root.querySelector('[data-ai-context]');
     this.time = root.querySelector('[data-ai-time]');
+    this.dataState = root.querySelector('[data-ai-data-state]');
     this.refreshButton = root.querySelector('[data-ai-refresh]');
     this.modelsReady = false;
     this.lastKey = '';
@@ -143,6 +144,7 @@ class AIAnalysisPanel {
     this.model.disabled = true;
     this.refreshButton.disabled = true;
     this.output.textContent = '';
+    this.dataState.textContent = '';
     this.time.textContent = '';
     this.setState('loading', '正在刷新可用模型…');
     try {
@@ -168,7 +170,7 @@ class AIAnalysisPanel {
     }
   }
 
-  setTarget(instrument, period) {
+  setTarget(instrument, period, flowMode = 'realtime') {
     const changed = this.target?.symbol !== instrument.code || this.target?.period !== period;
     this.target = {symbol: instrument.code, period};
     const container = document.querySelector(instrument.model === 'nav' ? '#fund-view .right-panel' : '#stock-view .right-panel');
@@ -176,17 +178,47 @@ class AIAnalysisPanel {
     this.context.textContent = `${instrument.name || instrument.code} · ${period === 'week' ? '周线' : '日线'}`;
     if (!changed) return;
     this.cancelAnalysis();
+    this.flowEnabled = !!instrument.fund_flow;
+    this.needsFlow = this.flowEnabled && flowMode === 'realtime';
+    this.flowSnapshot = null;
+    this.flowHealth = '';
     this.output.textContent = '';
+    this.dataState.textContent = '';
     this.time.textContent = '';
     if (this.modelsReady) this.scheduleAnalysis();
   }
 
+  setFlowMode(mode) {
+    const needsFlow = this.flowEnabled && mode === 'realtime';
+    if (needsFlow === this.needsFlow) return;
+    this.cancelAnalysis();
+    this.needsFlow = needsFlow;
+    this.flowSnapshot = null;
+    this.flowHealth = '';
+    this.scheduleAnalysis(true);
+  }
+
+  setFlowSnapshot(symbol, data) {
+    if (this.target?.symbol !== symbol || !this.needsFlow) return;
+    const status = data.stale ? 'stale' : data.status || 'error';
+    const health = JSON.stringify([status, data.summary_available, data.minute_status, data.source, data.data_date]);
+    const changed = this.flowHealth && this.flowHealth !== health;
+    this.flowSnapshot = {id: data.snapshot_id || null, status};
+    this.flowHealth = health;
+    if (!this.lastKey || changed) this.scheduleAnalysis(!!changed);
+  }
+
   scheduleAnalysis(force = false) {
     if (!this.target || !this.modelsReady || !this.model.value) return;
+    if (this.needsFlow && !this.flowSnapshot) {
+      this.setState('loading', '正在等待页面资金流状态…');
+      return;
+    }
     const key = `${this.target.symbol}:${this.target.period}:${this.model.value}`;
     if (!force && key === this.lastKey) return;
     this.cancelAnalysis();
     this.output.textContent = '';
+    this.dataState.textContent = '';
     this.time.textContent = '';
     this.setState('idle', '准备生成当前品种的解读…');
     this.timer = setTimeout(() => { this.timer = null; this.analyze(key); }, 350);
@@ -199,10 +231,17 @@ class AIAnalysisPanel {
     try {
       const data = await request.request(`${this.api}/api/ai/analyze`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({model: this.model.value, ...this.target}),
+        body: JSON.stringify({model: this.model.value, ...this.target,
+          ...(this.needsFlow ? {flow_snapshot: this.flowSnapshot} : {})}),
       });
       if (!request.active) return;
       this.output.innerHTML = renderAiContent(data.text);
+      if (data.fund_flow) {
+        const flow = data.fund_flow.realtime;
+        this.dataState.textContent = [flow.availability_note || flow.message,
+          data.fund_flow.daily_history?.availability_note,
+          flow.as_of ? `资金流截至 ${flow.as_of} · ${flow.source}` : ''].filter(Boolean).join('；');
+      }
       this.time.textContent = new Date(data.analyzed_at).toLocaleTimeString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
       this.setState('ready', '解读已更新');
     } catch (error) {

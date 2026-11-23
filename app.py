@@ -36,7 +36,7 @@ from data.kline_fetcher import (
     Kline, Quote, FundFlow, MinuteData, MinuteFlow, utc_now
 )
 from data.market_breadth import market_breadth_cache
-from data.fund_flow_service import history_status, serialize_history, realtime_flow_service
+from data.fund_flow_service import history_status, serialize_history, realtime_flow_service, analysis_snapshot
 from data.fund_nav import fetch_fund_nav
 from data.fund_terms import fetch_fund_terms
 from data.etf_premium import fetch_etf_premium
@@ -362,7 +362,8 @@ def handle_asset_analyze(instrument: dict, period: str) -> dict:
     return {"symbol": symbol, "instrument": instrument, "name": quote.name if quote else instrument["name"],
             "quote": quote_to_dict(quote) if quote else None, "signal": signal,
             "klines": [kline_to_dict(bar) for bar in klines[-120:]], "flows": serialize_history(flows),
-            "flow_status": history_status(flows, klines, period), "market_env": "", "breadth": None,
+            "flow_status": history_status(flows, klines, period, requested=instrument["canslim"]),
+            "market_env": "", "breadth": None,
             "breadth_status": {}, "kline_status": _kline_status(klines, period),
             "analyzed_at": utc_now(), "degraded": degraded, "timings_ms": timings}
 
@@ -415,19 +416,18 @@ def handle_etf_premium(params: dict) -> dict:
     disclosed = None
     if nav:
         latest = nav["history"][-1]
-        price = quote.price if quote else snapshot.get("price") if snapshot else None
+        verified_iopv = snapshot and snapshot.get("status") == "ok"
+        price = snapshot["price"] if verified_iopv else quote.price if quote else snapshot.get("price") if snapshot else None
+        price_time = snapshot["quote_time"] if verified_iopv else quote.timestamp if quote else snapshot.get("quote_time") if snapshot else None
         disclosed = {"value": latest["nav"], "date": latest["date"],
-                     "price": price, "price_time": quote.timestamp if quote else snapshot.get("quote_time") if snapshot else None,
-                     "price_stale": quote.stale if quote else not snapshot or not snapshot.get("snapshot_fresh"),
+                     "price": price, "price_time": price_time,
+                     "price_stale": False if verified_iopv else quote.stale if quote else not snapshot or not snapshot.get("snapshot_fresh"),
                      "premium_pct": round((price / latest["nav"] - 1) * 100, 3) if price else None,
                      "source": nav["source"], "source_url": nav["source_url"],
                      "fetched_at": nav["fetched_at"],
                      "basis": "本ETF已披露单位净值，非盘中估值；与当前交易价格可能不在同一时点。"}
-        if snapshot:
-            snapshot = {**snapshot, "nav_deviation_pct": round((snapshot["iopv"] / latest["nav"] - 1) * 100, 3)
-                        if snapshot.get("iopv") is not None else None, "nav_date": latest["date"]}
     result = {"symbol": symbol, "iopv": snapshot, "disclosed_nav": disclosed,
-              "status": "partial" if errors else "ok", "errors": errors}
+              "status": "partial" if errors or not snapshot or snapshot.get("status") != "ok" else "ok", "errors": errors}
     if not values:
         result.update(status="error", error="；".join(errors.values()))
     return result
@@ -812,21 +812,36 @@ def handle_ai_analysis(body: dict) -> dict:
     if not client.model.strip():
         raise ValueError("请先选择模型")
     instrument = get_instrument(symbol)
-    if instrument["model"] == "nav":
-        data = handle_fund({"symbol": [symbol]})
-        context = {**data, "history": data.get("history", [])[-30:], "instrument": instrument}
-    else:
-        data = handle_analyze({"symbol": [symbol], "period": [period]})
-        context = {key: data.get(key) for key in (
-            "symbol", "instrument", "quote", "signal", "analyzed_at", "degraded", "flow_status", "kline_status")}
-        context["recent_klines"] = data.get("klines", [])[-20:]
-        if instrument["asset_type"] == "overseas_etf":
-            context["premium_reference"] = handle_etf_premium({"symbol": [symbol]})
+    fund_flow = None
+    if instrument["fund_flow"]:
+        reference = body.get("flow_snapshot")
+        realtime = (realtime_flow_service.for_analysis(symbol, reference) if reference is not None else
+                    analysis_snapshot(handle_realtime_flow({"symbol": [symbol]})))
+        fund_flow = {"realtime": realtime}
+    is_nav = instrument["model"] == "nav"
+    data = (handle_fund({"symbol": [symbol]}) if is_nav else
+            handle_analyze({"symbol": [symbol], "period": [period]}))
     if data.get("error"):
         raise OSError(data["error"])
+    if is_nav:
+        context = {**data, "history": data.get("history", [])[-30:], "instrument": instrument}
+    else:
+        context = {key: data.get(key) for key in (
+            "symbol", "instrument", "quote", "signal", "analyzed_at", "degraded", "kline_status")}
+        if fund_flow is not None:
+            fund_flow["daily_history"] = data.get("flow_status") or history_status([], requested=False)
+            context["fund_flow"] = fund_flow
+        context["recent_klines"] = data.get("klines", [])[-20:]
+        if instrument["asset_type"] == "overseas_etf":
+            premium = handle_etf_premium({"symbol": [symbol]})
+            snapshot = premium.get("iopv")
+            # 无独立估值时间的原始参考数字不进入模型输入。
+            context["premium_reference"] = {**premium, "iopv":
+                {key: value for key, value in snapshot.items() if key != "reported_reference"} if snapshot else None}
     context["period"] = period
     return {"symbol": symbol, "period": period, "model": client.model,
             "text": client.analyze(context), "analyzed_at": utc_now(),
+            "fund_flow": fund_flow,
             "data_analyzed_at": data.get("analyzed_at") or data.get("fetched_at")}
 
 
@@ -880,7 +895,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError("请求体必须是JSON对象")
-            allowed = set() if path.endswith("/models") else {"symbol", "period", "model"}
+            allowed = set() if path.endswith("/models") else {"symbol", "period", "model", "flow_snapshot"}
             if set(body) - allowed:
                 raise ValueError("请求包含不支持的字段；CPA连接由后端配置")
             result = AIClient().models() if path.endswith("/models") else handle_ai_analysis(body)
@@ -909,8 +924,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if path == "/api/health":
                     self._json({"status": "ok", "time": time.strftime("%H:%M:%S"),
-                                "flow_api_version": 6, "flow_sources": ["腾讯", "东方财富"],
-                                "ai_api_version": 2, "premium_api_version": 2,
+                                "flow_api_version": 7, "flow_sources": ["腾讯", "东方财富"],
+                                "ai_api_version": 3, "premium_api_version": 3,
                                 "breadth_sources": ["新浪", "东方财富"]})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))

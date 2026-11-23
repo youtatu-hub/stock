@@ -7,7 +7,7 @@ const html = fs.readFileSync(require('node:path').join(__dirname, '../dashboard/
 const source = html.slice(html.indexOf('function renderFlow(flows,'), html.indexOf('// ===== 一句话总结'));
 
 function setup() {
-  const nodes = new Map(), pending = [], timers = new Map();
+  const nodes = new Map(), pending = [], timers = new Map(), aiSnapshots = [], aiModes = [];
   const chart = {option: {old: true}, clear() { this.option = null; }, setOption(value) {this.option = value;}};
   let timerId = 0;
   class Request {
@@ -23,13 +23,14 @@ function setup() {
     _klineData: [{date:'2026-11-12'}, {date:'2026-11-13'}, {date:'2026-11-16'}],
     currentSymbol:'999999', currentView:'dayk', API:'', flowChart:chart,
     StockLoadSession:Request, C:{up:'red',down:'green',textDim:'#888'},
+    aiPanel:{setFlowSnapshot:(symbol,data)=>aiSnapshots.push({symbol,data}),setFlowMode:mode=>aiModes.push(mode)},
     escHtml:value=>String(value), formatDataTime:value=>value || '未知',
     document:{getElementById(id) {if(!nodes.has(id)) nodes.set(id,{textContent:'',innerHTML:'',open:false,hidden:true,scrollTop:0,classList:{toggle(){}}});return nodes.get(id);}},
     setTimeout:(callback, delay)=>{timers.set(++timerId,{callback,delay});return timerId;},
     clearTimeout:id=>timers.delete(id),
   });
   vm.runInContext(source, context);
-  return {run:code=>vm.runInContext(code, context), nodes, pending, timers, chart};
+  return {run:code=>vm.runInContext(code, context), nodes, pending, timers, chart, aiSnapshots, aiModes};
 }
 
 test('切回实时立即清除旧图；失败显示时间和重试，并独立安排下次请求', async () => {
@@ -82,6 +83,46 @@ test('实时图显示实际来源和统计口径，切源时整组替换', () =>
   assert.match(page.nodes.get('flow-meta').innerHTML, /东方财富/);
   assert.equal(page.chart.option.series[0].data.length, 1);
   assert.equal(page.chart.option.series[0].data[0].value, -0.0001);
+});
+
+test('首小时缺口显示为空，保留有效累计值，并把同一快照交给AI', () => {
+  const page = setup();
+  page.run(`renderRealtimeFlow({snapshot_id:'a'.repeat(32),status:'partial',source:'腾讯',summary_available:true,
+    minute_status:'partial',availability_note:'实时累计可用；分钟序列局部缺失',
+    missing_ranges:[{start:'09:31',end:'10:29',count:59}],
+    flows:[{time:'09:31',available:false,main_net:null,super_large_net:null,large_net:null,medium_net:null,small_net:null},
+      {time:'15:00',available:true,main_net:-20000000,super_large_net:-30000000,large_net:10000000,medium_net:5000000,small_net:15000000}],
+    summary:{main_net:-20000000,super_large_net:-30000000,large_net:10000000,medium_net:5000000,small_net:15000000}})`);
+  assert.match(page.nodes.get('flow-meta').innerHTML, /实时累计可用；分钟序列局部缺失.*09:31–10:29（59分钟）/);
+  assert.match(page.nodes.get('flow-summary').innerHTML, /-0\.20亿/);
+  assert.equal(page.chart.option.series[0].data[0].value, null);
+  assert.equal(page.chart.option.series[0].data[1].value, -0.2);
+  for (const series of page.chart.option.series.slice(1)) assert.equal(series.data[0], null);
+  assert.match(page.nodes.get('flow-details-rows').innerHTML, /09:31.*未提供/);
+  assert.equal(page.aiSnapshots[0].symbol, '999999');
+  assert.equal(page.aiSnapshots[0].data.snapshot_id, 'a'.repeat(32));
+  assert.equal(page.aiSnapshots[0].data.summary.main_net, -20000000);
+});
+
+test('刷新失败保留原快照编号、金额和时间，AI收到的也是旧快照状态', async () => {
+  const page = setup();
+  page.run("switchFlowMode('realtime')");
+  const good = {snapshot_id:'a'.repeat(32),status:'ok',source:'腾讯',summary_available:true,minute_status:'complete',
+    fetched_at:new Date().toISOString(),as_of:'2026-11-23 15:00',availability_note:'实时累计可用；分钟序列完整',
+    flows:[{time:'15:00',main_net:10000}],summary:{main_net:10000}};
+  page.pending[0].resolve(good);
+  await new Promise(setImmediate);
+  [...page.timers.values()][0].callback();
+  page.pending[1].resolve({status:'error',flows:[],message:'请求超时'});
+  await new Promise(setImmediate);
+  const stale = page.aiSnapshots.at(-1).data;
+  assert.equal(stale.snapshot_id, good.snapshot_id);
+  assert.equal(stale.status, 'stale');
+  assert.equal(stale.summary.main_net, good.summary.main_net);
+  assert.equal(stale.as_of, good.as_of);
+  assert.match(page.nodes.get('flow-summary').innerHTML, /刷新失败，显示旧数据/);
+  assert.doesNotMatch(page.nodes.get('flow-meta').innerHTML, /实时累计可用/);
+  assert.deepEqual(page.aiModes, ['realtime']);
 });
 
 test('盘前说明、五类资金和分时明细同时展示', () => {
