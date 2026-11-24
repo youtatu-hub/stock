@@ -40,6 +40,7 @@ from data.fund_flow_service import history_status, serialize_history, realtime_f
 from data.fund_nav import fetch_fund_nav
 from data.fund_terms import fetch_fund_terms
 from data.etf_premium import fetch_etf_premium
+from data.qdii_estimate import fetch_estimate_market, build_model_estimate, close_snapshot_service
 from data.instruments import get_instrument, instrument_catalog
 from data.ai_client import AIClient
 from data.request_runtime import collect_stages, fetch_required, request_id
@@ -409,7 +410,8 @@ def handle_etf_premium(params: dict) -> dict:
         "iopv": lambda: fetch_etf_premium(symbol),
         "nav": lambda: fetch_fund_nav(symbol),
         "quote": lambda: fetch_quote(symbol),
-    }, required=("iopv", "nav", "quote"))
+        "estimate_market": fetch_estimate_market,
+    }, required=("iopv", "nav", "quote", "estimate_market"))
     snapshot = values.get("iopv")
     nav = values.get("nav")
     quote = values.get("quote")
@@ -426,9 +428,13 @@ def handle_etf_premium(params: dict) -> dict:
                      "source": nav["source"], "source_url": nav["source_url"],
                      "fetched_at": nav["fetched_at"],
                      "basis": "本ETF已披露单位净值，非盘中估值；与当前交易价格可能不在同一时点。"}
-    result = {"symbol": symbol, "iopv": snapshot, "disclosed_nav": disclosed,
-              "status": "partial" if errors or not snapshot or snapshot.get("status") != "ok" else "ok", "errors": errors}
-    if not values:
+    model_quote = {"price": quote.price, "time": quote.timestamp, "stale": quote.stale} if quote else None
+    model = build_model_estimate(get_instrument(symbol), nav, values.get("estimate_market"), model_quote)
+    if "estimate_market" in errors:
+        model["note"] = "期货或汇率获取失败：" + errors["estimate_market"]
+    result = {"symbol": symbol, "iopv": snapshot, "disclosed_nav": disclosed, "model_estimate": model,
+              "status": "partial" if errors or not snapshot or snapshot.get("status") != "ok" or model["status"] != "ok" else "ok", "errors": errors}
+    if not any(values.get(key) for key in ("iopv", "nav", "quote")):
         result.update(status="error", error="；".join(errors.values()))
     return result
 
@@ -925,7 +931,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/health":
                     self._json({"status": "ok", "time": time.strftime("%H:%M:%S"),
                                 "flow_api_version": 7, "flow_sources": ["腾讯", "东方财富"],
-                                "ai_api_version": 3, "premium_api_version": 4,
+                                "ai_api_version": 3, "premium_api_version": 5,
                                 "breadth_sources": ["新浪", "东方财富"]})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))
@@ -1011,6 +1017,7 @@ def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     market_breadth_cache.start()
+    close_snapshot_service.start()
     log.info(f"趋势分析实时买卖点工具启动 → http://{HOST}:{PORT}")
     log.info(f"API: /api/analyze?symbol=600000")
     try:
@@ -1019,6 +1026,7 @@ def main():
         log.info("服务停止")
     finally:
         market_breadth_cache.stop()
+        close_snapshot_service.stop()
         # 无论正常还是异常退出，都释放监听端口与资源
         server.shutdown()
         server.server_close()

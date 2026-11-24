@@ -251,6 +251,7 @@ class EtfPremiumTests(unittest.TestCase):
         nav = {"history": [{"date": "2026-01-02", "nav": 1}], "source": "fixture",
                "source_url": "https://example.test/nav", "fetched_at": "2026-01-05T02:00:00Z"}
         with patch.object(app, "fetch_etf_premium", side_effect=OSError("IOPV缺失")), \
+                patch.object(app, "fetch_estimate_market", return_value={}), \
                 patch.object(app, "fetch_quote", return_value=None), \
                 patch.object(app, "fetch_fund_nav", return_value=nav):
             result = app.handle_etf_premium({"symbol": ["513500"]})

@@ -1,7 +1,9 @@
 # CPA 与数据回归修复
 
 更新代码后重启 Python 服务；Docker 使用 `docker compose up -d --build`，随后刷新浏览器。
-`/api/health` 应包含 `flow_api_version: 7`、`premium_api_version: 4` 和 `ai_api_version: 3`。
+`/api/health` 应包含 `flow_api_version: 7`、`premium_api_version: 5` 和 `ai_api_version: 3`。
+
+版本5新增独立的[QDII模型估算](QDII模型估算.md)：按实际净值日期匹配美股收盘时点的期货和汇率基准，以价格比计算，不使用报价自带日涨跌幅。基准持久保存并自动按美东收盘时间采集；首次缺少历史基准时明确不可用，需要手动录入或等待后续采集。5%仅作模型信息提示，AI也必须标注模型估算，第19项仍未完成。
 
 `premium_api_version: 4` 表示免费来源参考展示已更新，不代表实时 IOPV 已恢复。页面直接显示来源最近收到的 IOPV 参考值、来源参考折溢价、对应快照市价、行情时间和本站获取时间；IOPV 计算时间未提供时保持为空。参考折溢价仅取来源返回值，来源缺失时不自行补算。行情过期标为旧报价，刷新失败保留上次参考并明确报错。该区块不触发实时提醒，也不作为实时 IOPV 传入 AI；无需安装 RQData。
 

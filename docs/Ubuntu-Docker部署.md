@@ -75,6 +75,8 @@ sudo docker compose up -d
 
 ## 4. 日常操作
 
+版本5的QDII模型估算会在美股收盘时自动保存期货、汇率基准，Compose使用 `qdii-baselines` 命名卷持久保存。首次历史基准录入及运行状态检查见[QDII模型估算](QDII模型估算.md)。更新后 `/api/health` 应包含 `premium_api_version: 5`；没有对应净值日期的基准时页面明确显示估算不可用。
+
 查看状态和日志：
 
 ```bash

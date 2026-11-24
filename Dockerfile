@@ -12,13 +12,16 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 stock \
-    && useradd --uid 10001 --gid stock --no-create-home --shell /usr/sbin/nologin stock
+    && useradd --uid 10001 --gid stock --no-create-home --shell /usr/sbin/nologin stock \
+    && mkdir -p /app/runtime/qdii \
+    && chown stock:stock /app/runtime/qdii
 
 COPY --chown=stock:stock app.py ./
 COPY --chown=stock:stock analysis/ ./analysis/
 COPY --chown=stock:stock data/ ./data/
 COPY --chown=stock:stock dashboard/ ./dashboard/
 COPY --chown=stock:stock libs/ ./libs/
+COPY --chown=stock:stock tools/ ./tools/
 
 USER stock
 

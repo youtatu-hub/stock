@@ -179,6 +179,7 @@ class PremiumRegressionTests(unittest.TestCase):
         quote = fetcher.Quote("513500", "测试", 1.2, 0, 0, 1, 1, 1, 1, 1, 1, 1)
         nav = {"history": [{"date": "2026-01-02", "nav": 1}], "source": "fixture", "source_url": "", "fetched_at": ""}
         with patch.object(app, "fetch_etf_premium", side_effect=OSError("IOPV缺失")), \
+                patch.object(app, "fetch_estimate_market", return_value={}), \
                 patch.object(app, "fetch_quote", return_value=quote), patch.object(app, "fetch_fund_nav", return_value=nav):
             result = app.handle_etf_premium({"symbol": ["513500"]})
         self.assertEqual(result["disclosed_nav"]["premium_pct"], 20)
@@ -200,7 +201,9 @@ class AIFlowContextTests(unittest.TestCase):
                 with patch.object(app, "realtime_flow_service", service), \
                         patch.object(app, "AIClient") as client_factory, \
                         patch.object(app, "handle_analyze", return_value={"symbol": symbol, "flow_status": history_status([], requested=False)}), \
-                        patch.object(app, "handle_etf_premium", return_value={"iopv": premium}), \
+                        patch.object(app, "handle_etf_premium", return_value={"iopv": premium, "model_estimate": {
+                            "kind": "model_estimate", "label": "模型估算", "status": "ok", "est_nav": 1.01,
+                            "est_nav_time": "2026-11-23T07:00:00+00:00", "alert_eligible": False}}), \
                         patch.object(app, "handle_realtime_flow", side_effect=AssertionError("不得另取一版实时流")):
                     client = client_factory.return_value
                     client.model = "fixture-model"
@@ -219,6 +222,8 @@ class AIFlowContextTests(unittest.TestCase):
                 self.assertEqual(result["fund_flow"], context["fund_flow"])
                 self.assertIsNone(context["premium_reference"]["iopv"]["iopv"])
                 self.assertNotIn("reported_reference", context["premium_reference"]["iopv"])
+                self.assertEqual(context["premium_reference"]["model_estimate"]["label"], "模型估算")
+                self.assertEqual(context["premium_reference"]["model_estimate"]["est_nav"], 1.01)
                 self.assertNotIn("reported_premium_pct", context["premium_reference"]["iopv"])
                 self.assertIsNone(context["premium_reference"]["iopv"]["premium_pct"])
 

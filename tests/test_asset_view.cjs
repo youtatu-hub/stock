@@ -2,7 +2,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const {resolveInstrument, seedInstrumentWatchlist, assetSummaryHtml, fundTermsHtml, hasCurrentIopv, premiumHtml} = require('../dashboard/asset-view.js');
+const {resolveInstrument, seedInstrumentWatchlist, assetSummaryHtml, fundTermsHtml, hasCurrentIopv, modelEstimateHtml, premiumHtml} = require('../dashboard/asset-view.js');
 const esc = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
 
 const catalog = {
@@ -134,4 +134,39 @@ test('小白模式显示后端CAN加权总分，不另算七项平均', () => {
   context.renderCanslim({c_score: 10, a_score: 20, n_score: 30, s_score: 40, l_score: 50, i_score: 60, m_score: 70, total: 53, signals: []});
   assert.match(nodes.get('cs-simple').innerHTML, />53<\/span>/);
   assert.doesNotMatch(nodes.get('cs-simple').innerHTML, /基本面综合评分/);
+});
+
+function modelFixture() {
+  return {status: 'ok', kind: 'model_estimate', label: '模型估算', est_nav: 1.122, est_premium_pct: 6.952,
+    est_nav_time: '2026-11-24T02:00:00Z', fresh_until: '2026-11-24T02:02:00Z',
+    price: 1.2, price_time: '2026-11-24T02:00:00Z', nav_date: '2026-11-20', base_nav: 1,
+    baseline_close_time: '2026-11-20T21:00:00Z', baseline_source: '合成基准', future_symbol: 'NQ',
+    nav_source: '合成净值', nav_source_url: 'https://example.test/nav',
+    formula: '净值 × 期货价格比 × 汇率价格比', premium_note: '仅作模型参考',
+    uncertainty_note: '模型误差尚未校准', notice: true, notice_threshold_pct: 5, alert_eligible: false,
+    inputs: {future: {price: 110, time: '2026-11-24T02:00:00Z', source: '合成期货'},
+      fx: {price: 7.14, time: '2026-11-24T02:00:00Z', source: '合成汇率'},
+      base_future: {price: 100, time: '2026-11-20T21:00:00Z'},
+      base_fx: {price: 7, time: '2026-11-20T21:00:00Z'}}};
+}
+
+test('模型估算独立展示净值、折溢价和各输入时间，5%只作信息提示', () => {
+  const html = premiumHtml({model_estimate: modelFixture()}, 3, esc, Date.parse('2026-11-24T02:00:30Z'));
+  assert.match(html, /QDII 模型估算.*非官方IOPV/);
+  assert.match(html, /模型估算净值<\/dt><dd>1\.1220/);
+  assert.match(html, /估算折溢价<\/dt><dd>\+6\.95%/);
+  assert.match(html, /基准净值日期<\/dt><dd>2026-11-20/);
+  for (const label of ['期货基准时间', '期货当前报价时间', '汇率基准时间', '汇率当前报价时间']) assert.ok(html.includes(label));
+  assert.match(html, /达到 5%，仅作信息提示/);
+  assert.doesNotMatch(html, /class="premium-alert"|实时IOPV<\/dt>|参考溢价幅度达到/);
+});
+
+test('模型输入过期或缺失时不显示旧估算值，错误文本安全转义', () => {
+  const expired = modelEstimateHtml(modelFixture(), esc, Date.parse('2026-11-24T02:02:01Z'));
+  assert.match(expired, /估算不可用/);
+  assert.doesNotMatch(expired, /1\.1220|6\.95%|达到 5%/);
+  const missing = modelEstimateHtml({status: 'unavailable', note: '<缺少基准>', est_nav: null}, esc);
+  assert.match(missing, /估算不可用/);
+  assert.match(missing, /&lt;缺少基准>/);
+  assert.doesNotMatch(missing, /<缺少基准>/);
 });

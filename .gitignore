@@ -12,5 +12,6 @@ gen
 __pycache__/
 *.py[cod]
 .env
+runtime/
 data/cpa_private.json
 data/cpa_private.json

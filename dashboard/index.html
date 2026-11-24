@@ -711,6 +711,9 @@ body {
 .premium-reference { margin-top: 12px; }
 .premium-reference-title { color: #c4d3e4; font-size: 12px; line-height: 1.8; }
 .premium-reference-title span { display: inline-block; margin-left: 8px; color: #aaa; font-size: 11px; }
+.premium-estimate { margin-top: 12px; padding-bottom: 12px; border-bottom: 1px solid #303030; }
+.estimate-inputs summary { cursor: pointer; color: #a6bbd0; font-size: 11px; line-height: 1.8; }
+.model-estimate-note { padding: 8px; border-radius: 5px; background: #101e2a; color: #a6c9e7; font-size: 11px; line-height: 1.6; }
 .premium-settings { padding: 8px 12px 0; font-size: 12px; color: #aaa; }
 .premium-settings input { width: 62px; color: #ddd; background: #171717; border: 1px solid #444; border-radius: 4px; padding: 4px; }
 .premium-settings input:disabled { opacity: .5; cursor: not-allowed; }
@@ -895,8 +898,8 @@ body {
     </div>
     <div class="signal-card" id="premium-card" hidden>
       <div class="sc-header">ETF 折溢价参考</div>
-      <div class="premium-settings"><label>实时提醒阈值 <input id="premium-threshold" type="number" min="0.1" max="100" step="0.1" value="3" required disabled> %</label>
-        <div class="asset-note">来源参考值不触发提醒；仅对时效可核验的实时IOPV启用。</div></div>
+      <div class="premium-settings"><label>IOPV实时提醒阈值 <input id="premium-threshold" type="number" min="0.1" max="100" step="0.1" value="3" required disabled> %</label>
+        <div class="asset-note">来源参考值和模型估算不触发实时提醒；仅对时效可核验的实时IOPV启用。</div></div>
       <div id="premium-body" aria-live="polite"></div>
     </div>
     <!-- 一句话总结（小白第一眼看的） -->

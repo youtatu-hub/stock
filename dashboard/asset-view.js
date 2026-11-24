@@ -66,13 +66,50 @@ function hasCurrentIopv(snapshot, now = Date.now()) {
     && now >= Date.parse(snapshot.quote_time) && now >= Date.parse(snapshot.iopv_time));
 }
 
+function modelEstimateHtml(model, escHtml, now = Date.now()) {
+  const number = value => Number.isFinite(value) ? value.toFixed(4) : '--';
+  const time = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'}) : '来源未提供';
+  const valid = model.status === 'ok' && Number.isFinite(model.est_nav) && model.est_nav > 0
+    && now >= Date.parse(model.est_nav_time) && now <= Date.parse(model.fresh_until);
+  const heading = '<div class="premium-reference-title">QDII 模型估算<span>期货与汇率代理 · 非官方IOPV</span></div>';
+  if (!valid) {
+    const note = model.status === 'ok' ? '估算输入或比较市价已过期，等待刷新。' : model.note;
+    return `<section class="premium-estimate" aria-label="模型估算">${heading}
+      <div class="asset-warning">估算不可用</div><div class="asset-note">${escHtml(note || '估算输入不完整')}</div></section>`;
+  }
+  const inputs = model.inputs;
+  const premium = Number.isFinite(model.est_premium_pct)
+    ? `${model.est_premium_pct > 0 ? '+' : ''}${model.est_premium_pct.toFixed(2)}%` : '--';
+  return `<section class="premium-estimate" aria-label="模型估算">${heading}
+    <dl class="asset-metrics"><dt>模型估算净值</dt><dd>${number(model.est_nav)}</dd>
+      <dt>估算折溢价</dt><dd>${premium}</dd><dt>比较用市价</dt><dd>${number(model.price)}</dd>
+      <dt>估算输入截至</dt><dd>${escHtml(time(model.est_nav_time))}</dd>
+      <dt>市价行情时间</dt><dd>${escHtml(time(model.price_time))}</dd>
+      <dt>基准净值日期</dt><dd>${escHtml(model.nav_date)}</dd></dl>
+    <div class="asset-note">${escHtml(model.premium_note)}</div>
+    ${model.notice ? `<div class="model-estimate-note">估算偏离幅度达到 ${escHtml(model.notice_threshold_pct)}%，仅作信息提示，不触发实时提醒。</div>` : ''}
+    <details class="estimate-inputs"><summary>估算依据与输入时间</summary><dl class="asset-metrics">
+      <dt>基准净值</dt><dd>${number(model.base_nav)}</dd>
+      <dt>净值日美股收盘</dt><dd>${escHtml(time(model.baseline_close_time))}</dd>
+      <dt>${escHtml(model.future_symbol)}基准价 → 现价</dt><dd>${number(inputs.base_future.price)} → ${number(inputs.future.price)}</dd>
+      <dt>期货基准时间</dt><dd>${escHtml(time(inputs.base_future.time))}</dd>
+      <dt>期货当前报价时间</dt><dd>${escHtml(time(inputs.future.time))}</dd>
+      <dt>USD/CNH基准 → 现价</dt><dd>${number(inputs.base_fx.price)} → ${number(inputs.fx.price)}</dd>
+      <dt>汇率基准时间</dt><dd>${escHtml(time(inputs.base_fx.time))}</dd>
+      <dt>汇率当前报价时间</dt><dd>${escHtml(time(inputs.fx.time))}</dd></dl>
+      <div class="asset-note">${escHtml(model.formula)}。期货使用连续合约最新价，汇率使用离岸人民币即期买卖中值。
+        基准来源：${escHtml(model.baseline_source)}；当前报价：${escHtml(inputs.future.source)} / ${escHtml(inputs.fx.source)}。
+        <a href="${escHtml(model.nav_source_url)}" target="_blank" rel="noopener noreferrer">${escHtml(model.nav_source)}净值 ↗</a></div></details>
+    <div class="asset-note">${escHtml(model.uncertainty_note)}</div></section>`;
+}
+
 function premiumHtml(response, threshold, escHtml, now = Date.now()) {
   const snapshot = response.iopv;
   const nav = response.disclosed_nav;
   const number = value => Number.isFinite(value) ? value.toFixed(4) : '--';
   const pct = value => Number.isFinite(value) ? `${value > 0 ? '+' : ''}${value.toFixed(2)}%` : '--';
   const time = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'}) : '来源未提供';
-  let html = '';
+  let html = response.model_estimate ? modelEstimateHtml(response.model_estimate, escHtml, now) : '';
   if (snapshot) {
     const fresh = hasCurrentIopv(snapshot, now);
     const reference = snapshot.reported_reference;
@@ -110,11 +147,12 @@ function premiumHtml(response, threshold, escHtml, now = Date.now()) {
     <div class="asset-note">${escHtml(nav.basis)}该口径不触发偏离提醒。
       <a href="${escHtml(nav.source_url)}" target="_blank" rel="noopener noreferrer">${escHtml(nav.source)} ↗</a></div></div>`;
   for (const [key, error] of Object.entries(response.errors || {})) {
+    if (key === 'estimate_market' && response.model_estimate) continue;
     html += `<div class="asset-error">${{iopv:'IOPV参考值',nav:'已披露净值',quote:'市价'}[key] || escHtml(key)}获取失败：${escHtml(error)}</div>`;
   }
   return html;
 }
 
 if (typeof module !== 'undefined') module.exports = {
-  resolveInstrument, seedInstrumentWatchlist, assetSummaryHtml, fundTermsHtml, hasCurrentIopv, premiumHtml,
+  resolveInstrument, seedInstrumentWatchlist, assetSummaryHtml, fundTermsHtml, hasCurrentIopv, modelEstimateHtml, premiumHtml,
 };
