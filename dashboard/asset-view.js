@@ -59,6 +59,13 @@ function fundTermsHtml(response, escHtml) {
   }).join('') + '<div class="asset-note">A/C 应比较申购费、持有期间销售服务费和对应期限赎回费；没有统一的一年分界。规则按销售渠道展示，获取时间不等于生效时间，限额不代表当前开放申购。管理费、托管费及销售服务费已在净值中计提。</div>';
 }
 
+function hasCurrentIopv(snapshot, now = Date.now()) {
+  return Boolean(snapshot && snapshot.status === 'ok' && snapshot.snapshot_fresh && snapshot.iopv_fresh
+    && !snapshot.stale && Number.isFinite(snapshot.iopv) && snapshot.iopv > 0
+    && Number.isFinite(snapshot.premium_pct) && now <= Date.parse(snapshot.fresh_until)
+    && now >= Date.parse(snapshot.quote_time) && now >= Date.parse(snapshot.iopv_time));
+}
+
 function premiumHtml(response, threshold, escHtml, now = Date.now()) {
   const snapshot = response.iopv;
   const nav = response.disclosed_nav;
@@ -66,35 +73,42 @@ function premiumHtml(response, threshold, escHtml, now = Date.now()) {
   const pct = value => Number.isFinite(value) ? `${value > 0 ? '+' : ''}${value.toFixed(2)}%` : '--';
   const time = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'}) : '来源未提供';
   let html = '';
+  if (snapshot) {
+    const fresh = hasCurrentIopv(snapshot, now);
+    const reference = snapshot.reported_reference;
+    if (fresh) {
+      const warning = snapshot.alert_eligible && Number.isFinite(threshold) && threshold > 0 && Math.abs(snapshot.premium_pct) >= threshold;
+      html += `<dl class="asset-metrics"><dt>比较用市价</dt><dd>${number(snapshot.price)}</dd>
+        <dt>实时IOPV</dt><dd>${number(snapshot.iopv)}</dd><dt>价格相对IOPV折溢价</dt><dd class="${warning ? 'premium-alert' : ''}">${pct(snapshot.premium_pct)}</dd>
+        <dt>IOPV估值时间</dt><dd>${escHtml(time(snapshot.iopv_time))}</dd></dl>
+        <div class="asset-note">${escHtml(snapshot.source)} · 价格行情时间 ${escHtml(time(snapshot.quote_time))}</div>
+        ${warning ? `<div class="asset-warning" role="status">参考${snapshot.premium_pct >= 0 ? '溢价' : '折价'}幅度达到 ${threshold}%，请核对时效与交易成本。</div>` : ''}`;
+    } else if (reference && Number.isFinite(reference.value)) {
+      const quoteFresh = !snapshot.stale && snapshot.snapshot_fresh && now >= Date.parse(reference.price_time)
+        && now <= Date.parse(reference.quote_fresh_until);
+      const quoteLabel = now < Date.parse(reference.price_time) ? '（时间异常）' : quoteFresh ? '' : '（旧报价）';
+      html += `<section class="premium-reference" aria-label="来源IOPV参考">
+        <div class="premium-reference-title">${escHtml(reference.source)} IOPV 参考<span>估值时效未核验</span></div>
+        ${snapshot.stale ? '<div class="asset-warning">以下为上次成功获取的参考数据，刷新失败。</div>' : ''}
+        <dl class="asset-metrics"><dt>最近收到的IOPV参考值</dt><dd>${number(reference.value)}</dd>
+        <dt>来源参考折溢价</dt><dd>${Number.isFinite(reference.premium_pct) ? pct(reference.premium_pct) : '来源未提供'}</dd>
+        <dt>来源快照市价${quoteLabel}</dt><dd>${number(reference.source_price)}</dd>
+        <dt>行情快照更新时间</dt><dd>${escHtml(time(reference.price_time))}</dd>
+        <dt>IOPV计算时间</dt><dd>${escHtml(time(reference.valuation_time))}</dd>
+        <dt>本站获取时间</dt><dd>${escHtml(time(reference.fetched_at))}</dd></dl>
+        <div class="asset-note">IOPV为来源最近收到的参考值；行情时间和本站获取时间均不代表IOPV计算时间。
+          折溢价直接使用来源返回值，时效未核验，不触发实时提醒，也不作为实时IOPV传入AI。
+          <a href="${escHtml(reference.source_url)}" target="_blank" rel="noopener noreferrer">${escHtml(reference.source)} ↗</a></div></section>`;
+    } else {
+      html += `<div class="asset-warning">实时IOPV不可用</div><div class="asset-note">${escHtml(snapshot.status === 'ok' ? '估值或行情已过期，等待刷新。' : snapshot.note)}；不计算当前IOPV折溢价，不触发提醒。</div>`;
+    }
+    if (snapshot.refresh_error) html += `<div class="asset-error">参考来源刷新失败：${escHtml(snapshot.refresh_error)}</div>`;
+  }
   if (nav) html += `<div class="premium-nav"><dl class="asset-metrics"><dt>已披露单位净值</dt><dd>${number(nav.value)}</dd>
     <dt>净值日期</dt><dd>${escHtml(nav.date)}</dd><dt>比较用市价${nav.price_stale ? '（旧报价）' : ''}</dt><dd>${number(nav.price)}</dd>
     <dt>市价行情时间</dt><dd>${escHtml(time(nav.price_time))}</dd><dt>市价相对已披露净值偏离</dt><dd>${pct(nav.premium_pct)}</dd></dl>
     <div class="asset-note">${escHtml(nav.basis)}该口径不触发偏离提醒。
       <a href="${escHtml(nav.source_url)}" target="_blank" rel="noopener noreferrer">${escHtml(nav.source)} ↗</a></div></div>`;
-  if (snapshot) {
-    const fresh = snapshot.status === 'ok' && snapshot.snapshot_fresh && snapshot.iopv_fresh
-      && !snapshot.stale && !!snapshot.iopv_time && Number.isFinite(snapshot.iopv)
-      && now <= Date.parse(snapshot.fresh_until) && now >= Date.parse(snapshot.quote_time);
-    if (fresh) {
-      const warning = snapshot.alert_eligible && Number.isFinite(threshold) && threshold > 0 && Math.abs(snapshot.premium_pct) >= threshold;
-      html += `<dl class="asset-metrics"><dt>比较用市价</dt><dd>${number(snapshot.price)}</dd>
-        <dt>实时IOPV</dt><dd>${number(snapshot.iopv)}</dd><dt>价格相对IOPV折溢价</dt><dd class="${warning ? 'premium-alert' : ''}">${pct(snapshot.premium_pct)}</dd>
-        <dt>IOPV独立更新时间</dt><dd>${escHtml(time(snapshot.iopv_time))}</dd></dl>
-        <div class="asset-note">${escHtml(snapshot.source)} · 价格行情时间 ${escHtml(time(snapshot.quote_time))}</div>
-        ${warning ? `<div class="asset-warning" role="status">参考${snapshot.premium_pct >= 0 ? '溢价' : '折价'}幅度达到 ${threshold}%，请核对时效与交易成本。</div>` : ''}`;
-    } else {
-      html += `<div class="asset-warning">实时IOPV不可用</div><div class="asset-note">${escHtml(snapshot.status === 'ok' ? '估值或行情已过期，等待刷新。' : snapshot.note)}；不计算当前IOPV折溢价，不触发提醒。</div>`;
-    }
-    const reference = snapshot.reported_reference;
-    if (!fresh && reference && Number.isFinite(reference.value)) {
-      html += `<details class="premium-reference"><summary>查看来源原始参考值（不可用于当前估值）</summary>
-        <dl class="asset-metrics"><dt>来源原始值</dt><dd>${number(reference.value)}</dd>
-        <dt>独立估值时间</dt><dd>${escHtml(time(reference.valuation_time))}</dd>
-        <dt>本站获取时间</dt><dd>${escHtml(time(reference.fetched_at))}</dd></dl>
-        <div class="asset-note">${escHtml(reference.source)}；获取时间不是估值时间。该数值仅供排查，不传入AI作为当前IOPV。</div></details>`;
-    }
-    if (snapshot.refresh_error) html += `<div class="asset-error">参考来源刷新失败：${escHtml(snapshot.refresh_error)}</div>`;
-  }
   for (const [key, error] of Object.entries(response.errors || {})) {
     html += `<div class="asset-error">${{iopv:'IOPV参考值',nav:'已披露净值',quote:'市价'}[key] || escHtml(key)}获取失败：${escHtml(error)}</div>`;
   }
@@ -102,5 +116,5 @@ function premiumHtml(response, threshold, escHtml, now = Date.now()) {
 }
 
 if (typeof module !== 'undefined') module.exports = {
-  resolveInstrument, seedInstrumentWatchlist, assetSummaryHtml, fundTermsHtml, premiumHtml,
+  resolveInstrument, seedInstrumentWatchlist, assetSummaryHtml, fundTermsHtml, hasCurrentIopv, premiumHtml,
 };

@@ -154,6 +154,10 @@ class PremiumRegressionTests(unittest.TestCase):
         self.assertIsNone(current["iopv"])
         self.assertIsNone(current["premium_pct"])
         self.assertEqual(current["reported_reference"]["value"], 1)
+        self.assertEqual(current["reported_reference"]["premium_pct"], 20)
+        self.assertEqual(current["reported_reference"]["source_price"], 1.2)
+        self.assertEqual(current["reported_reference"]["price_time"], snapshot["quote_time"])
+        self.assertIsNone(current["reported_reference"]["valuation_time"])
         self.assertFalse(current["alert_eligible"])
         self.assertEqual(snapshot["source"], "腾讯")
 
@@ -170,6 +174,8 @@ class PremiumRegressionTests(unittest.TestCase):
         self.assertIsNone(stale["iopv"])
         self.assertIsNone(stale["premium_pct"])
         self.assertFalse(stale["reported_reference"]["usable_for_analysis"])
+        self.assertEqual(stale["reported_reference"]["premium_pct"], 10)
+        self.assertEqual(stale["reported_reference"]["fetched_at"], snapshot["fetched_at"])
         quote = fetcher.Quote("513500", "测试", 1.2, 0, 0, 1, 1, 1, 1, 1, 1, 1)
         nav = {"history": [{"date": "2026-01-02", "nav": 1}], "source": "fixture", "source_url": "", "fetched_at": ""}
         with patch.object(app, "fetch_etf_premium", side_effect=OSError("IOPV缺失")), \
@@ -213,6 +219,8 @@ class AIFlowContextTests(unittest.TestCase):
                 self.assertEqual(result["fund_flow"], context["fund_flow"])
                 self.assertIsNone(context["premium_reference"]["iopv"]["iopv"])
                 self.assertNotIn("reported_reference", context["premium_reference"]["iopv"])
+                self.assertNotIn("reported_premium_pct", context["premium_reference"]["iopv"])
+                self.assertIsNone(context["premium_reference"]["iopv"]["premium_pct"])
 
     def test_api_without_page_reference_uses_shared_realtime_handler(self):
         page = RealtimeFlowService().snapshot("600000", lambda _: [])

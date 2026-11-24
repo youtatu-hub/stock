@@ -925,7 +925,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/health":
                     self._json({"status": "ok", "time": time.strftime("%H:%M:%S"),
                                 "flow_api_version": 7, "flow_sources": ["腾讯", "东方财富"],
-                                "ai_api_version": 3, "premium_api_version": 3,
+                                "ai_api_version": 3, "premium_api_version": 4,
                                 "breadth_sources": ["新浪", "东方财富"]})
                 elif path == "/api/analyze":
                     self._json(handle_analyze(params))

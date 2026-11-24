@@ -60,10 +60,11 @@ def parse_etf_snapshot(payload: dict, symbol: str) -> dict:
         raise ValueError("IOPV计算结果与来源折价率不一致")
     return {"symbol": symbol, "name": row.get("f14", ""), "price": price, "iopv": iopv,
             "premium_pct": round(premium, 3) if premium is not None else None,
+            "reported_premium_pct": -discount if discount is not None else None,
             "data_date": data_date.isoformat(), "quote_time": stamp.isoformat(),
             "iopv_time": None, "iopv_time_status": "unprovided", "source": "东方财富", "source_url": SOURCE_URL,
             "basis": "(同一来源快照价格 ÷ IOPV参考值 − 1) × 100%；正值为溢价，负值为折价。",
-            "note": "来源未提供IOPV独立更新时间，时效未核验；行情时间与获取时间均不能代替IOPV时间。参考偏离不触发实时提醒。"}
+            "note": "来源未提供IOPV计算时间，时效未核验；行情时间与获取时间均不能代替IOPV时间。参考偏离不触发实时提醒。"}
 
 
 def parse_tencent_snapshot(text: str, symbol: str) -> dict:
@@ -85,6 +86,8 @@ def parse_tencent_snapshot(text: str, symbol: str) -> dict:
 
 
 def snapshot_status(snapshot: dict, now: datetime | None = None) -> dict:
+    snapshot = dict(snapshot)
+    reported_premium = snapshot.pop("reported_premium_pct", None)
     now = now or datetime.now(timezone.utc)
     quote_time = datetime.fromisoformat(snapshot["quote_time"])
     age = (now - quote_time).total_seconds()
@@ -98,7 +101,7 @@ def snapshot_status(snapshot: dict, now: datetime | None = None) -> dict:
     elif snapshot["price"] is None:
         reason, note = "price_missing", "来源未提供比较用价格，不能计算当前IOPV折溢价"
     elif not iopv_time:
-        reason, note = "valuation_time_missing", "来源没有独立估值时间，无法提供可核验的实时IOPV"
+        reason, note = "valuation_time_missing", "来源未提供IOPV计算时间，估值时效无法核验"
     elif not iopv_fresh:
         reason, note = "valuation_time_invalid", "IOPV估值时间已过期或在未来，不能用于当前折溢价"
     elif not fresh:
@@ -110,9 +113,11 @@ def snapshot_status(snapshot: dict, now: datetime | None = None) -> dict:
             "status": "ok" if usable else "unavailable", "reason_code": reason, "note": note,
             "iopv": snapshot["iopv"] if usable else None,
             "premium_pct": snapshot["premium_pct"] if usable else None,
-            "reported_reference": {"value": snapshot["iopv"], "valuation_time": iopv_time,
+            "reported_reference": {"value": snapshot["iopv"], "premium_pct": reported_premium,
+                                   "valuation_time": iopv_time,
                                    "source": snapshot["source"], "source_url": snapshot["source_url"],
                                    "source_price": snapshot["price"], "price_time": snapshot["quote_time"],
+                                   "quote_fresh_until": (quote_time + timedelta(seconds=SNAPSHOT_FRESH_SECONDS)).isoformat(),
                                    "fetched_at": snapshot.get("fetched_at"), "usable_for_analysis": usable},
             "age_seconds": max(0, round(age)),
             "fresh_until": (oldest_time + timedelta(seconds=SNAPSHOT_FRESH_SECONDS)).isoformat(),

@@ -2,7 +2,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const {resolveInstrument, seedInstrumentWatchlist, assetSummaryHtml, fundTermsHtml, premiumHtml} = require('../dashboard/asset-view.js');
+const {resolveInstrument, seedInstrumentWatchlist, assetSummaryHtml, fundTermsHtml, hasCurrentIopv, premiumHtml} = require('../dashboard/asset-view.js');
 const esc = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
 
 const catalog = {
@@ -64,14 +64,61 @@ test('IOPV提醒会随时间过期，已披露净值偏离不触发提醒', () =
   assert.doesNotMatch(premiumHtml({...data, iopv: null}, 3, esc, now), /参考溢价幅度达到/);
   const unknownTime = premiumHtml({...data, iopv: {...data.iopv, status: 'unavailable', iopv: null, premium_pct: null,
     iopv_time: null, iopv_fresh: false, note: '来源没有独立估值时间',
-    reported_reference: {value: 1, valuation_time: null, fetched_at: '2026-01-05T02:00:30Z', source: '测试'}}}, 3, esc, now);
+    reported_reference: {value: 1, premium_pct: 10.04, source_price: 1.1, price_time: '2026-01-05T02:00:00Z',
+      quote_fresh_until: '2026-01-05T02:02:00Z', valuation_time: null,
+      fetched_at: '2026-01-05T02:00:30Z', source: '腾讯', source_url: 'https://example.test'}}}, 3, esc, now);
   assert.doesNotMatch(unknownTime, /参考溢价幅度达到/);
-  assert.match(unknownTime, /实时IOPV不可用.*来源没有独立估值时间/);
+  assert.match(unknownTime, /腾讯 IOPV 参考.*估值时效未核验/);
   assert.doesNotMatch(unknownTime, /价格相对IOPV折溢价<\/dt>|实时IOPV<\/dt>/);
-  assert.match(unknownTime, /<details class="premium-reference"><summary>查看来源原始参考值（不可用于当前估值）/);
-  assert.match(unknownTime, /来源原始值<\/dt><dd>1\.0000/);
-  assert.match(unknownTime, /独立估值时间<\/dt><dd>来源未提供/);
-  assert.doesNotMatch(unknownTime, /<details[^>]* open/);
+  assert.match(unknownTime, /<section class="premium-reference"/);
+  assert.match(unknownTime, /最近收到的IOPV参考值<\/dt><dd>1\.0000/);
+  assert.match(unknownTime, /来源参考折溢价<\/dt><dd>\+10\.04%/);
+  assert.match(unknownTime, /来源快照市价<\/dt><dd>1\.1000/);
+  assert.match(unknownTime, /行情快照更新时间<\/dt>/);
+  assert.match(unknownTime, /IOPV计算时间<\/dt><dd>来源未提供/);
+  assert.doesNotMatch(unknownTime, /<details|class="premium-alert"/);
+});
+
+test('来源折溢价缺失不自行补算；失败和过期参考保留原时间并标明旧报价', () => {
+  const now = Date.parse('2026-01-05T02:00:30Z');
+  const snapshot = {status: 'unavailable', snapshot_fresh: true, iopv: null, premium_pct: null,
+    reported_reference: {value: 1, premium_pct: null, source_price: 1.1, price_time: '2026-01-05T02:00:00Z',
+      quote_fresh_until: '2026-01-05T02:02:00Z', valuation_time: null,
+      fetched_at: '2026-01-05T02:00:01Z', source: '<测试>', source_url: 'https://example.test'}};
+  const html = premiumHtml({iopv: snapshot}, 3, esc, now);
+  assert.match(html, /来源参考折溢价<\/dt><dd>来源未提供/);
+  assert.doesNotMatch(html, /\+10\.00%|<测试>/);
+  const expired = premiumHtml({iopv: snapshot}, 3, esc, now + 200000);
+  assert.match(expired, /来源快照市价（旧报价）/);
+  const stale = premiumHtml({iopv: {...snapshot, stale: true, refresh_error: '<offline>'}}, 3, esc, now);
+  assert.match(stale, /上次成功获取的参考数据/);
+  assert.match(stale, /来源快照市价（旧报价）/);
+  assert.match(stale, /参考来源刷新失败：&lt;offline>/);
+  assert.match(stale, /IOPV计算时间<\/dt><dd>来源未提供/);
+  assert.doesNotMatch(stale, /参考溢价幅度达到|class="premium-alert"/);
+  const zero = premiumHtml({iopv: {...snapshot, reported_reference: {...snapshot.reported_reference, premium_pct: 0}}}, 3, esc, now);
+  assert.match(zero, /来源参考折溢价<\/dt><dd>0\.00%/);
+});
+
+test('提醒输入框随实时IOPV时效启停，来源参考值不会启用提醒', () => {
+  const html = fs.readFileSync(require.resolve('../dashboard/index.html'), 'utf8');
+  const now = Date.parse('2026-01-05T02:00:30Z');
+  const input = {value: '3', disabled: false, checkValidity: () => true};
+  const body = {innerHTML: ''};
+  const context = vm.createContext({hasCurrentIopv: snapshot => hasCurrentIopv(snapshot, now),
+    premiumHtml: () => 'rendered', escHtml: esc,
+    document: {getElementById: id => id === 'premium-threshold' ? input : body}});
+  vm.runInContext(html.slice(html.indexOf('function refreshPremiumPanel('), html.indexOf('function loadPremium(')), context);
+  context.refreshPremiumPanel({premiumData: {iopv: {status: 'unavailable', reported_reference: {value: 1, premium_pct: 10}}}});
+  assert.equal(input.disabled, true);
+  const verified = {status: 'ok', snapshot_fresh: true, iopv_fresh: true, iopv: 1, premium_pct: 10,
+    iopv_time: '2026-01-05T02:00:00Z', quote_time: '2026-01-05T02:00:00Z', fresh_until: '2026-01-05T02:02:00Z'};
+  context.refreshPremiumPanel({premiumData: {iopv: verified}});
+  assert.equal(input.disabled, false);
+  context.refreshPremiumPanel({premiumData: {iopv: {...verified, fresh_until: '2026-01-05T02:00:01Z'}}});
+  assert.equal(input.disabled, true);
+  assert.equal(hasCurrentIopv({...verified, iopv_time: '2026-01-05T02:01:00Z'}, now), false);
+  assert.equal(hasCurrentIopv(null, now), false);
 });
 
 test('小白模式显示后端CAN加权总分，不另算七项平均', () => {

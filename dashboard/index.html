@@ -708,10 +708,12 @@ body {
 .asset-metrics .premium-alert { color: #ffb74d; font-weight: bold; }
 .premium-nav { border-top: 1px solid #303030; margin-top: 12px; }
 .premium-nav:first-child { border-top: 0; margin-top: 0; }
-.premium-reference { margin-top: 12px; color: #8593a5; font-size: 11px; }
-.premium-reference summary { cursor: pointer; line-height: 1.7; }
+.premium-reference { margin-top: 12px; }
+.premium-reference-title { color: #c4d3e4; font-size: 12px; line-height: 1.8; }
+.premium-reference-title span { display: inline-block; margin-left: 8px; color: #aaa; font-size: 11px; }
 .premium-settings { padding: 8px 12px 0; font-size: 12px; color: #aaa; }
 .premium-settings input { width: 62px; color: #ddd; background: #171717; border: 1px solid #444; border-radius: 4px; padding: 4px; }
+.premium-settings input:disabled { opacity: .5; cursor: not-allowed; }
 #premium-body, #fund-terms { padding: 0 12px 10px; }
 .fund-terms-share { padding: 12px 0; border-bottom: 1px solid #303030; }
 .fund-share-btn { padding: 5px 12px; background: #171717; color: #bbb; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
@@ -893,7 +895,8 @@ body {
     </div>
     <div class="signal-card" id="premium-card" hidden>
       <div class="sc-header">ETF 折溢价参考</div>
-      <div class="premium-settings"><label>偏离提醒阈值 <input id="premium-threshold" type="number" min="0.1" max="100" step="0.1" value="3" required> %</label></div>
+      <div class="premium-settings"><label>实时提醒阈值 <input id="premium-threshold" type="number" min="0.1" max="100" step="0.1" value="3" required disabled> %</label>
+        <div class="asset-note">来源参考值不触发提醒；仅对时效可核验的实时IOPV启用。</div></div>
       <div id="premium-body" aria-live="polite"></div>
     </div>
     <!-- 一句话总结（小白第一眼看的） -->
@@ -2739,17 +2742,17 @@ function applyAssetVisibility(instrument) {
   document.getElementById('flow-section').hidden = !instrument.fund_flow;
   document.getElementById('premium-card').hidden = instrument.asset_type !== 'overseas_etf';
   document.getElementById('premium-body').textContent = '';
+  document.getElementById('premium-threshold').disabled = true;
   document.getElementById('summary-card').querySelector('.sc-header').textContent = stock ? '规则分析结论' : instrument.price_models ? '趋势参考' : '资产观察';
 }
 
 function refreshPremiumPanel(session) {
   if (session.premiumData) {
     const input = document.getElementById('premium-threshold');
+    input.disabled = !hasCurrentIopv(session.premiumData.iopv);
     const threshold = input.checkValidity() && input.value !== '' ? Number(input.value) : NaN;
     const body = document.getElementById('premium-body');
-    const referenceOpen = body.querySelector('.premium-reference')?.open;
     body.innerHTML = premiumHtml(session.premiumData, threshold, escHtml);
-    if (referenceOpen && body.querySelector('.premium-reference')) body.querySelector('.premium-reference').open = true;
   }
 }
 
@@ -2761,6 +2764,7 @@ function loadPremium(symbol, session) {
     refreshPremiumPanel(session);
   }, error => {
     session.premiumData = null;
+    document.getElementById('premium-threshold').disabled = true;
     document.getElementById('premium-body').textContent = `折溢价参考获取失败：${error.message}；暂停提醒。`;
   }).finally(() => { session.premiumRefreshing = false; });
 }

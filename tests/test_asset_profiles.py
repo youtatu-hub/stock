@@ -149,8 +149,39 @@ class EtfPremiumTests(unittest.TestCase):
     def test_sign_and_same_snapshot_price(self):
         result = etf_premium.parse_etf_snapshot(premium_payload(), "513500")
         self.assertEqual(result["premium_pct"], 10)
+        self.assertEqual(result["reported_premium_pct"], 10)
         self.assertIsNone(result["iopv_time"])
         self.assertEqual(result["price"], 1.1)
+
+    def test_reference_premium_keeps_source_value_without_enabling_current_iopv(self):
+        snapshot = etf_premium.parse_etf_snapshot(premium_payload(f402=-10.04), "513500")
+        now = datetime.fromisoformat(snapshot["quote_time"]) + timedelta(seconds=30)
+        snapshot["fetched_at"] = now.isoformat()
+        for _ in range(2):
+            result = etf_premium.snapshot_status(snapshot, now)
+            reference = result["reported_reference"]
+            self.assertEqual(reference["premium_pct"], 10.04)
+            self.assertEqual(reference["source_price"], 1.1)
+            self.assertEqual(reference["price_time"], snapshot["quote_time"])
+            self.assertEqual(reference["fetched_at"], snapshot["fetched_at"])
+            self.assertIsNone(reference["valuation_time"])
+            self.assertFalse(reference["usable_for_analysis"])
+            self.assertEqual(result["status"], "unavailable")
+            self.assertIsNone(result["iopv"])
+            self.assertIsNone(result["premium_pct"])
+            self.assertIsNone(result["iopv_time"])
+            self.assertFalse(result["alert_eligible"])
+            self.assertNotIn("reported_premium_pct", result)
+        self.assertEqual(snapshot["reported_premium_pct"], 10.04)
+
+    def test_missing_reported_rate_is_not_replaced_by_computed_rate(self):
+        snapshot = etf_premium.parse_etf_snapshot(premium_payload(f402="-"), "513500")
+        self.assertEqual(snapshot["premium_pct"], 10)
+        result = etf_premium.snapshot_status(snapshot)
+        self.assertIsNone(result["reported_reference"]["premium_pct"])
+        for price, discount, expected in [(0.9, 10, -10), (1, 0, 0)]:
+            snapshot = etf_premium.parse_etf_snapshot(premium_payload(f2=price, f402=discount), "513500")
+            self.assertEqual(etf_premium.snapshot_status(snapshot)["reported_reference"]["premium_pct"], expected)
 
     def test_stale_future_and_missing_iopv_cannot_alert(self):
         result = etf_premium.parse_etf_snapshot(premium_payload(), "513500")
@@ -189,6 +220,8 @@ class EtfPremiumTests(unittest.TestCase):
         self.assertIsNone(result["iopv"])
         self.assertIsNone(result["premium_pct"])
         self.assertFalse(result["reported_reference"]["usable_for_analysis"])
+        self.assertEqual(result["reported_reference"]["premium_pct"], 10)
+        self.assertEqual(result["reported_reference"]["price_time"], stamp)
 
     def test_invalid_numbers_identity_dates_and_inconsistent_rates_fail(self):
         for change in [{"f12": "513100"}, {"f297": 20260106}, {"f402": 10}, {"f441": 0},
